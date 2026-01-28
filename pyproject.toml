@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "respighi"
+description = "REScaling Phreatic Ground water Head Interaction"
+readme = { file = "README.rst", content-type = "text/x-rst" }
+maintainers = [{ name = "Huite Bootsma", email = "huite.bootsma@deltares.nl" }]
+requires-python = ">=3.10"
+dependencies = [
+    'numpy',
+    'scipy',
+    'xarray',
+]
+dynamic = ["version"]
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Intended Audience :: Science/Research',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python',
+    'Operating System :: OS Independent',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Topic :: Scientific/Engineering',
+]
+keywords = ['groundwater']
+license = { text = "MIT" }
+
+[tool.hatch.version]
+path = "respighi/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["respighi", "tests"]
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64"]
+
+[tool.pixi.pypi-dependencies]
+respighi = { path = ".", editable = true }
+
+[tool.pixi.dependencies]
+scipy = "*"
+python = ">=3.12"
+xarray = "*"
+numba = "*"
+jupyter = "*"
+matplotlib = "*"
+pip = "*"
+netcdf4 = "*"
+xugrid = "*"
+pyamg = "*"
+pypardiso = "*"
+ruff = ">=0.14.13,<0.15"
+pandamesh = ">=0.2.3,<0.3"
+
+[tool.ruff.lint]
+# See https://docs.astral.sh/ruff/rules/
+select = ["C4", "D2", "D3", "D4", "E", "F", "I", "NPY", "PD"]
+ignore = [
+    "D202",
+    "D205",
+    "D206",
+    "D400",
+    "D404",
+    "E402",
+    "E501",
+    "E703",
+    "PD002",
+    "PD003",
+    "PD004",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
