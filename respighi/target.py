@@ -20,6 +20,23 @@ class FittingTarget(abc.ABC):
         return self.P.shape[0]
 
 
+class GridSampling(FittingTarget):
+    """
+    Provide a grid with notnull head values.
+    Mostly useful for testing.
+    """
+
+    def __init__(self, head: FloatArray, weights=None):
+        hflat = head.ravel()
+        j = np.argwhere(np.isfinite(hflat))[0]
+        nhead = len(j)
+        i = np.arange(nhead)
+        if weights is None:
+            weights = np.ones(nhead)
+        self.P = sparse.csr_matrix((weights, (i, j)), shape=(nhead, hflat.size))
+        self.d = head[j]
+
+
 class CellSampling(FittingTarget):
     """Sample at cell centers (nearest neighbor)."""
 
@@ -67,8 +84,8 @@ class InterpolatedSampling(FittingTarget):
         self.d = head
 
 
-class CoarseModelTarget(FittingTarget):
-    """Fit to cell averages from a coarse model."""
+class ModelTarget(FittingTarget):
+    """Fit to cell averages from a model."""
 
     def __init__(self, head: xr.DataArray, grid: Ugrid2d, weights=None):
         # Create dummy grid for regridder API

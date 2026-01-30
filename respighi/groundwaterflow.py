@@ -6,6 +6,7 @@ from scipy import sparse
 from respighi.cg import PCGSolver
 from respighi.constants import FloatArray, BoolArray
 from respighi.ilu0 import ILU0Preconditioner
+import pypardiso
 
 import xugrid as xu
 
@@ -15,8 +16,8 @@ class Recharge:
     _rhs: FloatArray
 
     def __init__(self, rate):
-        self.rate = rate
-        self._rhs = np.empty_like(rate)
+        self.rate = rate.ravel()
+        self._rhs = np.empty_like(self.rate)
 
     def formulate(self, rhs, area):
         np.multiply(area, self.rate, out=self._rhs)
@@ -30,9 +31,9 @@ class HeadBoundary:
     _rhs: FloatArray
 
     def __init__(self, conductance, head):
-        self.conductance = conductance
-        self.head = head
-        self._rhs = np.empty_like(conductance)
+        self.conductance = conductance.ravel()
+        self.head = head.ravel()
+        self._rhs = np.empty_like(self.conductance)
 
     def formulate(self, hcof, rhs, head):
         hcof += self.conductance
@@ -48,10 +49,10 @@ class Drainage:
     _active: BoolArray
 
     def __init__(self, conductance, elevation):
-        self.conductance = conductance
-        self.elevation = elevation
-        self._rhs = np.empty_like(conductance)
-        self._active = np.empty(conductance.shape, dtype=bool)
+        self.conductance = conductance.ravel()
+        self.elevation = elevation.ravel()
+        self._rhs = np.empty_like(self.conductance)
+        self._active = np.empty(self.conductance.shape, dtype=bool)
 
     def formulate(self, hcof, rhs, head):
         # Only active if elevation < head
@@ -72,13 +73,13 @@ class River:
     _linear: BoolArray
 
     def __init__(self, conductance, stage, elevation):
-        self.conductance = conductance
-        self.stage = stage
-        self.elevation = elevation
-        self._fixed_rhs = conductance * (stage - elevation)
-        self._rhs = np.empty_like(conductance)
-        self._fixed = np.empty(conductance.shape, dtype=bool)
-        self._linear = np.empty(conductance.shape, dtype=bool)
+        self.conductance = conductance.ravel()
+        self.stage = stage.ravel()
+        self.elevation = elevation.ravel()
+        self._fixed_rhs = self.conductance * (self.stage - self.elevation)
+        self._rhs = np.empty_like(self.conductance)
+        self._fixed = np.empty(self.conductance.shape, dtype=bool)
+        self._linear = np.empty(self.conductance.shape, dtype=bool)
 
     def formulate(self, hcof, rhs, head):
         # Fixed rate if head < bottom elevation, linear otherwise.
@@ -100,6 +101,7 @@ class GroundwaterModel:
         initial,
         recharge,
         head_boundaries,
+        transmissivity: FloatArray | None = None,
         xclose_linear: float = 1e-5,
         rclose_linear: float = 1e-5,
         maxiter_linear: int = 100,
@@ -111,6 +113,11 @@ class GroundwaterModel:
         self.head_boundaries = head_boundaries
 
         n = self.initial.size
+        if transmissivity is None:
+            self.transmissivity = np.ones(n)
+        else:
+            self.transmissivity = transmissivity
+
         self.area = np.full(n, area)
         self.n = n
         self.rhs = np.zeros(n)
@@ -119,7 +126,7 @@ class GroundwaterModel:
         self._update = np.empty_like(self.head)
 
         # Matrix assembly
-        W = self._build_connectivity(initial.shape)
+        W = self._build_connectivity(transmissivity)
         # Compute the (weighted) degree matrix
         self.D = np.asarray(W.sum(axis=1)).ravel()
         self.hcof = self.D.copy()
@@ -140,9 +147,10 @@ class GroundwaterModel:
         self.xclose = xclose
 
     @staticmethod
-    def _build_connectivity(shape):
+    def _build_connectivity(transmissivity):
         # Get the Cartesian neighbors for a finite difference approximation.
         # TODO: check order of dimensions with DataArray
+        shape = transmissivity.shape
         size = np.prod(shape)
         index = np.arange(size).reshape(shape)
 
@@ -161,7 +169,14 @@ class GroundwaterModel:
 
         i = np.concatenate(ii)
         j = np.concatenate(jj)
-        return sparse.coo_matrix((np.ones(len(i)), (i, j)), shape=(size, size)).tocsr()
+        kD = transmissivity.ravel()
+        # NOTE:
+        # Treat as serial resistances -> harmonic mean
+        # We assume dy == dx such that width and lengths cancel.
+        kDi = kD[i]
+        kDj = kD[j]
+        conductance = (2 * kDi * kDj) / (kDi + kDj)
+        return sparse.coo_matrix((conductance, (i, j)), shape=(size, size)).tocsr()
 
     def formulate(self, recharge=True):
         # Reset
@@ -177,7 +192,7 @@ class GroundwaterModel:
 
     def direct_linear_solve(self):
         self.A.setdiag(self.hcof)
-        self.head[:] = sparse.linalg.spsolve(self.A, self.rhs)
+        self.head[:] = pypardiso.spsolve(self.A, self.rhs)
         return
 
     def linear_solve(self, warn=True):
@@ -198,8 +213,10 @@ class GroundwaterModel:
             np.copyto(self._head_old, self.head)
             self.formulate()
             converged_linear, iterations_linear = self.linear_solve(warn=False)
+            # self.direct_linear_solve()
             np.subtract(self.head, self._head_old, out=self._update)
             maxdx = np.linalg.norm(self._update, ord=np.inf)
+            print(maxdx)
             if maxdx < self.xclose:
                 return True, i + 1
 

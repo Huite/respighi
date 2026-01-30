@@ -5,14 +5,14 @@ import numpy as np
 
 from respighi.pardiso import PardisoWrapper
 from respighi.groundwaterflow import GroundwaterModel
-from respighi.target import CompositeFittingTarget
+from respighi.target import FittingTarget
 
 
 class InverseProblem:
     def __init__(
         self,
         groundwatermodel: GroundwaterModel,
-        target: CompositeFittingTarget,
+        target: FittingTarget,
         regularization_weight: float,
         maxiter: int = 30,
         maxdh=1e-4,
@@ -60,7 +60,11 @@ class InverseProblem:
         P = self.target.P
         Pt = P.T
 
-        L = regularization_weight * self.gwf.Abase.copy()
+        # NOTE:
+        # also assumes constant cell sizes, and dx == dy.
+        W = self.gwf._build_connectivity(np.ones(self.n))
+        D = np.asarray(W.sum(axis=1)).ravel()  # Degree matrix
+        L = regularization_weight * (sparse.diags(D) - W)
         Lt = L.T
 
         Q = sparse.diags(self.gwf.area)

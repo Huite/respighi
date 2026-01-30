@@ -61,9 +61,21 @@ model.linear_solve()  # 0.5 s, 170_000 cells in 78 iterations
 # %%
 
 head = stage.copy(data=model.head.reshape(stage.shape))
-fig, ax = plt.subplots()
-head.plot.imshow(ax=ax, levels=30)
-ax.set_aspect(1.0)
+fig, axes = plt.subplots(2, 2, figsize=(25, 12))
+(ax0, ax1, ax2, ax3) = axes.ravel()
+rate.plot.imshow(ax=ax0)
+head.plot.imshow(ax=ax1, levels=30)
+ax0.set_aspect(1.0)
+ax1.set_aspect(1.0)
+
+rate.isel(y=80).plot(ax=ax2)
+head.isel(y=80).plot(ax=ax3)
+
+
+ax0.set_title("R*")
+ax1.set_title("Head")
+ax2.set_title("R* (y=562 000)")
+ax3.set_title("Head (y=562 000")
 
 # %%
 
@@ -93,30 +105,34 @@ inverse.formulate()
 
 inverse.linear_solve()
 
-# %%
-
-inverse.nonlinear_solve()
+# inverse.nonlinear_solve()
 
 # %%
 
 invhead = stage.copy(data=inverse.head.reshape(stage.shape))
-fig, (ax0, ax1, ax2) = plt.subplots(nrows=3, figsize=(20, 10))
-invhead.plot.imshow(ax=ax0, levels=30)
-ax0.scatter(x=x, y=y, s=15, alpha=0.5)
+fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(20, 10))
+(ax0, ax1, ax2, ax3) = axes.ravel()
 
-head.plot.imshow(ax=ax1, levels=30)
+head.plot.imshow(ax=ax0, levels=30)
+ax0.scatter(x=x, y=y, s=15, alpha=0.5)
+invhead.plot.imshow(ax=ax1, levels=30)
+
 
 invrate = stage.copy(data=inverse.recharge.reshape(stage.shape))
 invrate.plot.imshow(ax=ax2)
 
-for ax in (ax0, ax1, ax2):
+diff = invhead - head
+diff.plot.imshow(ax=ax3)
+
+for ax in axes.ravel():
     ax.set_aspect(1.0)
 
+ax0.set_title("Head")
+ax1.set_title("Estimated Head")
+ax2.set_title("Estimated R*")
+ax3.set_title("Head Error")
 # %%
 
-diff = invhead - head
-
-diff.plot.imshow()
 
 # %%
 
@@ -137,7 +153,7 @@ coarse = regridder.regrid(head)
 coarsegrid = xu.Ugrid2d.from_structured(coarse)
 # %%
 
-target = rsp.CoarseModelTarget(head=coarse, grid=xu.Ugrid2d.from_structured(head))
+target = rsp.ModelTarget(head=coarse, grid=xu.Ugrid2d.from_structured(head))
 
 # %%
 
@@ -169,27 +185,37 @@ for ax in (ax0, ax1, ax2):
 
 # %%
 
-fig, (ax0, ax1, ax2) = plt.subplots(nrows=3, figsize=(10, 20))
+fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(20, 10))
+(ax0, ax1, ax2, ax3) = axes.ravel()
 
 coarse.sel(x=slice(238_000, 240_000)).sel(y=slice(564_000.0, 562_000.0)).plot(ax=ax0)
-ax0.hlines(xmin=238_000.0, xmax=240_000.0, y=563012.5, color="r")
+ax0.hlines(xmin=238_000.0, xmax=240_000.0, y=563000.0, color="r")
 head.sel(x=slice(238_000, 240_000)).sel(y=slice(564_000.0, 562_000.0)).plot.contour(
     ax=ax1
 )
-ax1.hlines(xmin=238_000.0, xmax=240_000.0, y=563012.5, color="r")
+ax1.hlines(xmin=238_000.0, xmax=240_000.0, y=563000.0, color="r")
 
 ax0.set_aspect(1.0)
 ax1.set_aspect(1.0)
 
-invhead.sel(x=slice(238_000, 240_000)).sel(y=563012.5, method="nearest").plot.step(
+invhead.sel(x=slice(238_000, 240_000)).sel(y=563000.0, method="nearest").plot.step(
     ax=ax2, lw=2, where="mid"
 )
-head.sel(x=slice(238_000, 240_000)).sel(y=563012.5, method="nearest").plot.step(
+head.sel(x=slice(238_000, 240_000)).sel(y=563000.0, method="nearest").plot.step(
     ax=ax2, ls="-", where="mid"
 )
-coarse.sel(x=slice(238_000, 240_000)).sel(y=563012.5, method="nearest").plot.step(
+coarse.sel(x=slice(238_000, 240_000)).sel(y=563000.0, method="nearest").plot.step(
     ax=ax2, where="mid"
 )
+
+invrate.sel(x=slice(238_000, 240_000)).sel(y=slice(564_000.0, 562_000.0)).plot(ax=ax3)
+ax3.set_aspect(1.0)
+
+ax0.set_title("Head coarse")
+ax1.set_title("Estimated head")
+ax2.set_title("Heads (y=563_000)")
+ax3.set_title("R*")
+
 # %%
 
 half_coarse = coarse.sel(x=slice(244_000.0, None))
@@ -200,9 +226,7 @@ headvalues = head.sel(
 ).to_numpy()
 # %%
 
-coarsetarget = rsp.CoarseModelTarget(
-    head=half_coarse, grid=xu.Ugrid2d.from_structured(head)
-)
+coarsetarget = rsp.ModelTarget(head=half_coarse, grid=xu.Ugrid2d.from_structured(head))
 pointtarget = rsp.CellSampling(x=x[select], y=y[select], head=headvalues, grid=grid)
 target = rsp.CompositeFittingTarget([coarsetarget, pointtarget])
 # %%
@@ -221,14 +245,23 @@ inverse.linear_solve()
 # %%
 
 invhead = stage.copy(data=inverse.head.reshape(stage.shape))
-fig, (ax0, ax1, ax2) = plt.subplots(nrows=3, figsize=(20, 10))
-invhead.plot.imshow(ax=ax0, levels=30)
-halfcoarsegrid.plot(ax=ax0, color="k", alpha=0.5, lw=0.5)
-ax0.scatter(x=x[select], y=y[select], s=15, alpha=0.5)
-ax0.set_xlim(xmin, xmax)
-ax0.set_ylim(ymin, ymax)
+fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(20, 10))
+(ax0, ax1, ax2, ax3) = axes.ravel()
 
-head.plot.imshow(ax=ax1, levels=30)
+coarse.plot.imshow(ax=ax0, levels=30)
+
+invhead.plot.imshow(ax=ax1, levels=30)
+halfcoarsegrid.plot(ax=ax1, color="k", alpha=0.5, lw=0.5)
+ax1.scatter(x=x[select], y=y[select], s=15, alpha=0.5)
+ax1.set_xlim(xmin, xmax)
+ax1.set_ylim(ymin, ymax)
+
+(invhead - head).plot.imshow(ax=ax3)
+
+ax0.set_title("Coarse head")
+ax1.set_title("Estimated head")
+ax2.set_title("R*")
+ax3.set_title("Head error")
 
 invrate = stage.copy(data=inverse.recharge.reshape(stage.shape))
 invrate.plot.imshow(ax=ax2)

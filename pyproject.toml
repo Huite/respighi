@@ -57,6 +57,7 @@ pyamg = "*"
 pypardiso = "*"
 ruff = ">=0.14.13,<0.15"
 pandamesh = ">=0.2.3,<0.3"
+imod = ">=1.0.0.post1,<2"
 
 [tool.ruff.lint]
 # See https://docs.astral.sh/ruff/rules/

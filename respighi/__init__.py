@@ -9,11 +9,26 @@ from respighi.groundwaterflow import (
 )
 
 from respighi.target import (
-    FittingTarget,
+    GridSampling,
     CellSampling,
     InterpolatedSampling,
-    CoarseModelTarget,
+    ModelTarget,
     CompositeFittingTarget,
 )
 
 from respighi.inverse import InverseProblem
+
+
+__all__ = (
+    "Recharge",
+    "HeadBoundary",
+    "Drainage",
+    "River",
+    "GroundwaterModel",
+    "GridSampling",
+    "CellSampling",
+    "InterpolatedSampling",
+    "ModelTarget",
+    "CompositeFittingTarget",
+    "InverseProblem",
+)

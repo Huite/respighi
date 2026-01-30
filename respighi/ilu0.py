@@ -183,7 +183,7 @@ class ILU0Preconditioner(NamedTuple):
         _update(ilu, MatrixCSR.from_csr_matrix(A), delta, relax)
         return ilu
 
-    def update(self, A, delta=0.0, relax=0.0) -> None:
+    def update(self, A, delta=0.0, relax=0.97) -> None:
         _update(self, MatrixCSR.from_csr_matrix(A), delta, relax)
         return
 
