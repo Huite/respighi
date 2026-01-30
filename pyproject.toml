@@ -7,7 +7,7 @@ name = "respighi"
 description = "REScaling Phreatic Ground water Head Interaction"
 readme = { file = "README.rst", content-type = "text/x-rst" }
 maintainers = [{ name = "Huite Bootsma", email = "huite.bootsma@deltares.nl" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     'numpy',
     'scipy',
@@ -58,6 +58,12 @@ pypardiso = "*"
 ruff = ">=0.14.13,<0.15"
 pandamesh = ">=0.2.3,<0.3"
 imod = ">=1.0.0.post1,<2"
+sphinx = ">=9.1.0,<10"
+pydata-sphinx-theme = ">=0.16.1,<0.17"
+sphinx-gallery = ">=0.20.0,<0.21"
+
+[tool.pixi.tasks]
+docs = "sphinx-build docs docs/_build"
 
 [tool.ruff.lint]
 # See https://docs.astral.sh/ruff/rules/

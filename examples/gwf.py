@@ -1,50 +1,51 @@
-# %%
+"""
+MODFLOW 6 Comparison
+====================
+
+This example compares the ``respighi.GroundwaterModel`` with
+MODFLOW 6 to check correctness.
+"""
 
 import numpy as np
-
-import respighi as rsp
 import xarray as xr
 import imod
+import matplotlib.pyplot as plt
+
+import respighi as rsp
 
 # %%
+# We load a number of boundary conditions, prepared as netCDF.
 
-riverds = xr.open_dataset("river.nc").astype(np.float64)
-tubeds = xr.open_dataset("tube.nc").astype(np.float64)
-ditchds = xr.open_dataset("ditch.nc").astype(np.float64)
-olf = xr.open_dataarray("overlandflow.nc").astype(np.float64)
-transmissivity = xr.open_dataarray("transmissivity.nc").astype(np.float64)
+riverds = xr.open_dataset("testdata/river.nc").astype(np.float64)
+tubeds = xr.open_dataset("testdata/tube.nc").astype(np.float64)
+ditchds = xr.open_dataset("testdata/ditch.nc").astype(np.float64)
+olf = xr.open_dataarray("testdata/overlandflow.nc").astype(np.float64)
+transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float64)
+
 # %%
+# Initialize the relevant boundary condition classes, initialize the
+# groundwater model, formulate, then solve.
 
 river = rsp.River(
     conductance=riverds["conductance"].fillna(0.0).to_numpy(),
     stage=riverds["stage"].fillna(0.0).to_numpy(),
     elevation=riverds["bottom"].fillna(0.0).to_numpy(),
 )
-# %%
-
 ditch = rsp.Drainage(
     conductance=ditchds["conductance"].fillna(0.0).to_numpy(),
     elevation=ditchds["elevation"].fillna(0.0).to_numpy(),
 )
-
 overlandflow = rsp.Drainage(
     conductance=xr.full_like(olf, 500.0).to_numpy(),
     elevation=olf.to_numpy(),
 )
-# %%
-
 tube = rsp.Drainage(
     conductance=tubeds["conductance"].fillna(0.0).to_numpy(),
     elevation=tubeds["elevation"].fillna(0.0).to_numpy(),
 )
-
 recharge = rsp.Recharge(
     rate=xr.full_like(transmissivity, 0.001).to_numpy(),
 )
-
-
-# %%
-
 gwf = rsp.GroundwaterModel(
     area=25.0 * 25.0,
     initial=xr.full_like(transmissivity, 0.0).to_numpy(),
@@ -55,17 +56,24 @@ gwf = rsp.GroundwaterModel(
     maxiter=50,
 )
 gwf.formulate()
-
-# %%
-
 gwf.nonlinear_solve()
 
 # %%
+# Let's check the result.
 
+fig, ax = plt.subplots()
 head = transmissivity.copy(data=gwf.head.reshape(transmissivity.shape))
-head.plot.contourf(levels=30)
+head.name = "Head"
+head.plot.contourf(levels=30, ax=ax)
+ax.set_aspect(1.0)
 
 # %%
+# MODFLOW 6
+# ---------
+#
+# We will use the imod package to build a comparable MODFLOW 6 model.
+#
+# In this case, we need to make explicit that this is one layer model.
 
 
 def set_layer1(da):
@@ -74,7 +82,6 @@ def set_layer1(da):
 
 bottom = set_layer1(xr.zeros_like(transmissivity))
 idomain = set_layer1(xr.ones_like(transmissivity, dtype=int))
-
 tubeds = set_layer1(tubeds)
 ditchds = set_layer1(ditchds)
 riverds = set_layer1(riverds)
@@ -83,11 +90,13 @@ transmissivity = set_layer1(transmissivity)
 rate = xr.full_like(transmissivity, 0.001)
 
 # %%
+# Unfortunately, the river conductance still contains some zero
+# condutance values; imod's validation does not accept these.
 
 riverds = riverds.where(riverds["conductance"] > 0)
 
 # %%
-
+# Build the MF6 GWF model, attach to a simulation, write, then run.
 
 gwf_model = imod.mf6.GroundwaterFlowModel()
 gwf_model["dis"] = imod.mf6.StructuredDiscretization(
@@ -125,18 +134,15 @@ gwf_model["sto"] = imod.mf6.SpecificStorage(
 gwf_model["oc"] = imod.mf6.OutputControl(save_head="all")
 gwf_model["rch"] = imod.mf6.Recharge(rate=rate)
 
-
-# Attach it to a simulation
 simulation = imod.mf6.Modflow6Simulation("ex01-twri")
 simulation["GWF_1"] = gwf_model
-# Define solver settings
 simulation["solver"] = imod.mf6.Solution(
     modelnames=["GWF_1"],
     print_option="summary",
-    outer_dvclose=1.0e-6,
+    outer_dvclose=1.0e-4,
     outer_maximum=500,
     under_relaxation=None,
-    inner_dvclose=1.0e-8,
+    inner_dvclose=1.0e-5,
     inner_rclose=0.001,
     inner_maximum=100,
     linear_acceleration="cg",
@@ -144,32 +150,23 @@ simulation["solver"] = imod.mf6.Solution(
     reordering_method=None,
     relaxation_factor=0.97,
 )
-# %%
-# Collect time discretization
 simulation.create_time_discretization(additional_times=["2000-01-01", "2000-01-02"])
+simulation.write("testdata/mf6-reference")
 
 # %%
+# Run the simulation, and read the resulting heads into memory.
 
-simulation.write("reference")
-# %%
 simulation.run()
+mf6head = simulation.open_head().isel(time=0, layer=0).compute()
+
+fig, ax = plt.subplots()
+mf6head.plot.contourf(levels=30, ax=ax)
+ax.set_aspect(1.0)
 
 # %%
-mf6heads = simulation.open_head().isel(time=0, layer=0).compute()
-# %%
+# Now let's check the differences. These should be no more
+# than expected from the the non-linear tolerance of the solvers.
 
-mf6heads.plot.contourf(levels=30)
-
-# %%
-
-diff = head - mf6heads
-
-# %%
-
-diff.plot.imshow()
-
-# %%
-
-
-simulation.dump("../testdata/mf6-simulation.toml")
-# %%
+fig, ax = plt.subplots()
+(head - mf6head).plot.imshow()
+ax.set_aspect(1.0)

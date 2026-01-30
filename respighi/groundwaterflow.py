@@ -126,12 +126,12 @@ class GroundwaterModel:
         self._update = np.empty_like(self.head)
 
         # Matrix assembly
-        W = self._build_connectivity(transmissivity)
+        self.W = self._build_connectivity(transmissivity)
         # Compute the (weighted) degree matrix
-        self.D = np.asarray(W.sum(axis=1)).ravel()
+        self.D = np.asarray(self.W.sum(axis=1)).ravel()
         self.hcof = self.D.copy()
         # Compute the Laplacian
-        self.Abase = sparse.diags(self.D) - W
+        self.Abase = sparse.diags(self.D) - self.W
         self.A = self.Abase.copy()
 
         self.linearsolver = PCGSolver(

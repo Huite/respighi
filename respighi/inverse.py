@@ -16,6 +16,7 @@ class InverseProblem:
         regularization_weight: float,
         maxiter: int = 30,
         maxdh=1e-4,
+        relax=0.5,
     ):
         # Store core attributes
         self.gwf = groundwatermodel
@@ -24,10 +25,13 @@ class InverseProblem:
         self.regularization_weight = regularization_weight
         self.maxiter = maxiter
         self.maxdh = maxdh
+        self.relax = relax
         # Build KKT system
         self.K = self._build_matrix(regularization_weight)
         self.rhs = self._build_rhs_vector()
         self.x = np.zeros_like(self.rhs)
+        self._x_old = np.zeros_like(self.rhs)
+        self._x_update = np.zeros_like(self.rhs)
         self._head_old = np.zeros(self.n)
         self._head_update = np.zeros(self.n)
         self.linearsolver = None
@@ -62,7 +66,8 @@ class InverseProblem:
 
         # NOTE:
         # also assumes constant cell sizes, and dx == dy.
-        W = self.gwf._build_connectivity(np.ones(self.n))
+        W = self.gwf.W.copy()
+        W.data[:] = 1.0
         D = np.asarray(W.sum(axis=1)).ravel()  # Degree matrix
         L = regularization_weight * (sparse.diags(D) - W)
         Lt = L.T
@@ -140,12 +145,16 @@ class InverseProblem:
             raise RuntimeError("Must call formulate() before solve")
 
         for i in range(self.maxiter):
+            np.copyto(dst=self._x_old, src=self.x)
             np.copyto(dst=self._head_old, src=self.head)
             self.linear_solve()
             np.subtract(self.head, self._head_old, out=self._head_update)
+            np.subtract(self.x, self._x_old, out=self._x_update)
             maxdh = np.linalg.norm(self._head_update, ord=np.inf)
+            print(maxdh)
             if maxdh < self.maxdh:
                 return True, i + 1
+            self.x -= self.relax * self._x_update
             self.reformulate()
 
         warnings.warn(

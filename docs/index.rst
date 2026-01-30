@@ -30,3 +30,9 @@ In all cases, Respighi formulates an inverse problem: it finds the recharge
 field that, when the groundwater flow equation is solved, best reproduces the
 observations or model output. Laplacian regularization ensures smooth recharge
 estimates.
+
+.. toctree::
+    :maxdepth: 2
+
+    examples/gwf.rst
+    examples/interpolation.rst
