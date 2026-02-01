@@ -9,6 +9,60 @@ from respighi.target import FittingTarget
 
 
 class InverseProblem:
+    """
+    Inverse problem solver for groundwater model to fit a target head.
+
+    Solves the constrained optimization problem of estimating recharge rates by
+    minimizing the misfit between model predictions and observations, subject
+    to regularization and the groundwater flow equations.
+
+    The optimization problem minimizes:
+        J(h, r) = ½||P·h - d||² + ½·α||L·r||²
+
+    Subject to constraints:
+        - A·h - Q·r = b_bc  (groundwater flow equation)
+        - P·h = d + e       (observation equation)
+        - L·r = s           (regularization equation)
+
+    Where:
+        - h: hydraulic head
+        - r: recharge rates (parameters to estimate)
+        - d: observed head values
+        - P: observation operator
+        - A: groundwater flow matrix (head-dependent)
+        - Q: recharge-to-flux operator
+        - L: regularization operator (Laplacian)
+        - α: regularization weight
+
+    The problem is solved using the Lagrangian approach with KKT conditions,
+    forming a saddle-point system. Nonlinearity from head-dependent conductances
+    is handled via Picard iteration.
+
+    Parameters
+    ----------
+    groundwatermodel : GroundwaterModel
+        The groundwater flow model providing system matrices and parameters
+    target : FittingTarget
+        Observation data and operator (P matrix and d vector)
+    regularization_weight : float
+        Weight for spatial smoothness regularization (α)
+    maxiter : int, optional
+        Maximum number of Picard iterations (default: 30)
+    maxdh : float, optional
+        Convergence tolerance for non-linear head updates (default: 1e-4)
+    relax : float, optional
+        Relaxation factor for Picard iteration (default: 0.0)
+
+    Attributes
+    ----------
+    head : ndarray
+        Current estimate of hydraulic head
+    recharge : ndarray
+        Current estimate of recharge rates
+    lagrangian : ndarray
+        Current estimate of Lagrange multipliers
+    """
+
     def __init__(
         self,
         groundwatermodel: GroundwaterModel,
@@ -16,7 +70,7 @@ class InverseProblem:
         regularization_weight: float,
         maxiter: int = 30,
         maxdh=1e-4,
-        relax=0.5,
+        relax=0.0,
     ):
         # Store core attributes
         self.gwf = groundwatermodel
@@ -26,7 +80,6 @@ class InverseProblem:
         self.maxiter = maxiter
         self.maxdh = maxdh
         self.relax = relax
-        # Build KKT system
         self.K = self._build_matrix(regularization_weight)
         self.rhs = self._build_rhs_vector()
         self.x = np.zeros_like(self.rhs)
@@ -92,7 +145,7 @@ class InverseProblem:
         )
 
     def _build_rhs_vector(self) -> np.ndarray:
-        """Build right-hand side vector for KKT system."""
+        """Build right-hand side vector for system."""
         return np.concatenate(
             [
                 np.zeros(self.n),
@@ -118,6 +171,10 @@ class InverseProblem:
         return
 
     def formulate(self):
+        """
+        Formulate the system of equations, call PARDISO's analysis (phase 11)
+        and numerical factorization (phase 22).
+        """
         self._formulate_gwf()
         self.linearsolver = PardisoWrapper(self.K, self.rhs, self.x)
         # Analysis is the most costly phase.
@@ -125,11 +182,19 @@ class InverseProblem:
         self.linearsolver.factorize()
 
     def reformulate(self):
+        """
+        Formulate the system of equations, call PARDISO's numerical
+        factorization; unlike ``.formulate``, this does not call the expensive
+        analysis phase.
+        """
         # Structure is static, reuse results of analysis.
         self._formulate_gwf()
         self.linearsolver.factorize()
 
     def linear_solve(self):
+        """
+        Solve the linear system for ``[h, r, λ]^T``.
+        """
         if self.linearsolver is None:
             raise RuntimeError("Must call formulate() before solve")
         self.linearsolver.solve()
@@ -137,7 +202,7 @@ class InverseProblem:
 
     def nonlinear_solve(self):
         """
-        Solve nonlinear system using Picard iteration.
+        Solve the nonlinear system for ``[h, r, λ]^T`` using Picard iteration.
 
         Call .formulate() first.
         """
@@ -165,12 +230,15 @@ class InverseProblem:
 
     @property
     def head(self):
+        "Current estimate of head."
         return self.x[: self.n]
 
     @property
     def recharge(self):
+        "Current estimate of recharge."
         return self.x[self.n : 2 * self.n]
 
     @property
     def lagrangian(self):
+        "Current estimate of Langrangian."
         return self.x[-self.n :]

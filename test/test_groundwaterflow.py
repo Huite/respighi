@@ -172,7 +172,7 @@ h2[:] = np.nan
 h2[5] = midhead - 1.0
 target1 = rsp.GridSampling(h1)
 target2 = rsp.GridSampling(h2)
-inverse = rsp.InverseProblem(gwf, rsp.CompositeFittingTarget([target1, target2]), 1.0)
+inverse = rsp.InverseProblem(gwf, rsp.CompositeTarget([target1, target2]), 1.0)
 # %%
 
 inverse.formulate()

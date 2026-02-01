@@ -1,15 +1,15 @@
 """
-Piezometer Interpolation
-========================
+Model head scaling
+==================
 
 This examples show a synthetic example:
 
 * We do a regular run with the groundwater model to create
   a steady-state hydraulic head.
-* Next, we take the head at 100 random sites; these represent
-  "piezometers".
-* Then, we pose an inverse problem, and attempt to interpolate
-  (or in this case: reconstruct) the head.
+* Next, we regrid the hydraulic head to a ten times coarser spatial resolution.
+* Then, we pose an inverse problem, and attempt to downscale (or in this case:
+  reconstruct) the head.
+
 """
 # %%
 
@@ -19,6 +19,10 @@ import xugrid as xu
 import matplotlib.pyplot as plt
 
 import respighi as rsp
+
+import os
+
+os.chdir("Z:/src/respighi/examples")
 
 # %%
 # We load a number of boundary conditions, prepared as netCDF.
@@ -96,31 +100,46 @@ head.plot(levels=30, ax=ax)
 ax.set_aspect(1.0)
 
 # %%
-# Piezometers
-# -----------
+# Coarsening
+# ----------
 #
-# We will do random sampling, and select 100 sites.
+# We will create a coarse head grid with cells of 250 m by 250 m.
+# Xarray stores midpoint values, so we add or subtract half of the cellsize.
 
-xmin = riverds["x"].min().item()
-ymin = riverds["y"].min().item()
-xmax = riverds["x"].max().item()
-ymax = riverds["y"].max().item()
+xmin = riverds["x"].min().item() - 12.5
+ymin = riverds["y"].min().item() - 12.5
+xmax = riverds["x"].max().item() + 12.5
+ymax = riverds["y"].max().item() + 12.5
 
-rng = np.random.default_rng()
-nsites = 100
-x = xmin + (xmax - xmin) * rng.random(nsites)
-y = ymin + (ymax - ymin) * rng.random(nsites)
-headvalues = head.sel(x=xr.DataArray(x), y=xr.DataArray(y), method="nearest").to_numpy()
+# %%
+# Now let's make sure 250.0 is a whole divisor of the new grid's coordinates.
 
+dy = dx = 250.0
+xnew = np.arange(np.ceil(xmin / dx) * dx + 0.5 * dx, np.floor(xmax / dx) * dx, dx)
+ynew = np.arange(np.ceil(ymin / dx) * dx + 0.5 * dx, np.floor(ymax / dy) * dy, dy)[::-1]
+template = xr.DataArray(
+    data=np.zeros((ynew.size, xnew.size)),
+    coords={"y": ynew, "x": xnew},
+    dims=("y", "x"),
+)
+regridder = xu.OverlapRegridder(source=head, target=template)
+coarsehead = regridder.regrid(head)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+coarsehead.plot(ax=ax)
+ax.set_aspect(1.0)
+
+# %%
 # Target
 # ------
 #
-# We use these sites to create a fitting target.
-# For now, respighi requires an xugrid.Ugrid2d topology as the grid definition.
+# We use this coarse grid to create a fitting target. For now, respighi
+# requires an xugrid.Ugrid2d topology as the grid definition.
 
 grid = xu.Ugrid2d.from_structured(transmissivity)
-target = rsp.CellSampling(x, y, headvalues, grid)
+target = rsp.ModelTarget(coarsehead, grid)
 
+# %%
 # Inverse Problem
 # ---------------
 #
@@ -143,17 +162,17 @@ inverse.formulate()
 # Solve.
 
 inverse.nonlinear_solve()
-
 # %%
+
 # Now let's check the reconstructed head and compare with the original.
 
 rehead = head.copy(data=inverse.head.reshape(head.shape))
 
-fig, axes = plt.subplots(nrows=3, figsize=(10, 13))
+fig, axes = plt.subplots(nrows=4, figsize=(10, 17))
 head.plot(ax=axes[0], levels=30)
-rehead.plot(ax=axes[1], levels=30)
-axes[1].scatter(x=x, y=y, alpha=0.50, color="k")
-(rehead - head).plot(ax=axes[2])
+coarsehead.plot(ax=axes[1], levels=30)
+rehead.plot(ax=axes[2], levels=30)
+(rehead - head).plot(ax=axes[3])
 for ax in axes:
     ax.set_aspect(1.0)
 
@@ -168,11 +187,3 @@ rerate.plot(ax=axes[1], levels=30)
 (rerate - rate).plot(ax=axes[2])
 for ax in axes:
     ax.set_aspect(1.0)
-
-# %%
-# Finally, let's have a look at the Langrangian
-
-lang = head.copy(data=inverse.lagrangian.reshape(head.shape))
-fig, ax = plt.subplots(figsize=(10, 4))
-lang.plot(ax=ax)
-ax.set_aspect(1.0)

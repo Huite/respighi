@@ -13,7 +13,7 @@ from respighi.target import (
     CellSampling,
     InterpolatedSampling,
     ModelTarget,
-    CompositeFittingTarget,
+    CompositeTarget,
 )
 
 from respighi.inverse import InverseProblem
@@ -29,6 +29,6 @@ __all__ = (
     "CellSampling",
     "InterpolatedSampling",
     "ModelTarget",
-    "CompositeFittingTarget",
+    "CompositeTarget",
     "InverseProblem",
 )

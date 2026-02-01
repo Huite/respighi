@@ -14,7 +14,7 @@ class PardisoWrapper:
     This does not re-allocate x, ia, ja every call and separates
     analyze, formulate, and solve steps more cleanly.
 
-    Note that we assume the references to A, b, x are maintained
+    Note that we assume the shared references to A, b, x are maintained
     consistently!
     """
 
@@ -27,6 +27,16 @@ class PardisoWrapper:
 
     @staticmethod
     def pardiso_args(pardiso, A, b, x):
+        """
+        Create a (mutable!) cache (i.e. a list) of arguments.
+
+        When sparsity structure does not change, most data can be re-used for
+        repeated solves (e.g. Picard iteration).
+
+        Code here is taken almost verbatim from the
+        PyPardisSolver._call_pardiso method, where x, ia, ja, and all ctypes
+        objects are created on each call instead.
+        """
         pardiso_error = ctypes.c_int32(0)
         c_int32_p = ctypes.POINTER(ctypes.c_int32)
         c_float64_p = ctypes.POINTER(ctypes.c_double)
@@ -62,6 +72,9 @@ class PardisoWrapper:
         return args
 
     def call_pardiso(self, args: list, phase: int):
+        # Mutate the phase and include a fresh erro status, then call pardiso.
+        # A and b are assumed to be shared references, shared here and by
+        # whatever is updating coefficients.
         pardiso_error = ctypes.c_int32(0)
         args[4] = ctypes.byref(ctypes.c_int32(phase))
         args[-1] = ctypes.byref(pardiso_error)

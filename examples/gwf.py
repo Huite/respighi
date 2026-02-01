@@ -64,7 +64,7 @@ gwf.nonlinear_solve()
 fig, ax = plt.subplots()
 head = transmissivity.copy(data=gwf.head.reshape(transmissivity.shape))
 head.name = "Head"
-head.plot.contourf(levels=30, ax=ax)
+head.plot(levels=30, ax=ax)
 ax.set_aspect(1.0)
 
 # %%
@@ -160,7 +160,7 @@ simulation.run()
 mf6head = simulation.open_head().isel(time=0, layer=0).compute()
 
 fig, ax = plt.subplots()
-mf6head.plot.contourf(levels=30, ax=ax)
+mf6head.plot(levels=30, ax=ax)
 ax.set_aspect(1.0)
 
 # %%

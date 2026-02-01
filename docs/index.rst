@@ -32,7 +32,8 @@ observations or model output. Laplacian regularization ensures smooth recharge
 estimates.
 
 .. toctree::
-    :maxdepth: 2
+   :titlesonly:
+   :hidden:
 
-    examples/gwf.rst
-    examples/interpolation.rst
+   user_guide
+   api

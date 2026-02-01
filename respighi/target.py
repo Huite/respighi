@@ -94,7 +94,7 @@ class ModelTarget(FittingTarget):
         )
         regridder = OverlapRegridder(source=source, target=head)
         W = regridder._weights
-        Wcsr = sparse.csr_matrix((W.data, W.indices, W.indptr))
+        Wcsr = sparse.csr_matrix((W.data, W.indices, W.indptr), shape=(W.n, W.m))
 
         # Normalize rows to get averages
         row_sums = np.asarray(Wcsr.sum(axis=1)).ravel()
@@ -106,7 +106,7 @@ class ModelTarget(FittingTarget):
         self.d = head.to_numpy().ravel()
 
 
-class CompositeFittingTarget(FittingTarget):
+class CompositeTarget(FittingTarget):
     """Combine multiple fitting targets into a single P matrix and d vector."""
 
     def __init__(self, targets: list[FittingTarget]):
