@@ -154,7 +154,7 @@ inverse = rsp.InverseProblem(
 )
 
 # %%
-# Formulate separately, so we get an impression of the time (about 4 seconds).
+# Formulate separately, so we get an impression of the time (about 5 seconds).
 
 inverse.formulate()
 
@@ -187,3 +187,55 @@ rerate.plot(ax=axes[1], levels=30)
 (rerate - rate).plot(ax=axes[2])
 for ax in axes:
     ax.set_aspect(1.0)
+
+# %%
+# Composite targets
+# -----------------
+#
+# We may also combine both piezometers and model results.
+# Let's use the model for one half, then the piezometers for the other half.
+
+rng = np.random.default_rng()
+nsites = 100
+xall = xmin + (xmax - xmin) * rng.random(nsites)
+yall = ymin + (ymax - ymin) * rng.random(nsites)
+xhalf = 0.5 * (xmin + xmax)
+selection = xall > xhalf
+x = xall[selection]
+y = yall[selection]
+headvalues = head.sel(x=xr.DataArray(x), y=xr.DataArray(y), method="nearest").to_numpy()
+samplingtarget = rsp.CellSampling(x, y, headvalues, grid)
+
+# %%
+# We'll take half of the earlier coarse grid.
+
+modeltarget = rsp.ModelTarget(coarsehead.sel(x=slice(None, xhalf)), grid=grid)
+
+# %%
+# And we'll combine them into a single fitting target.
+
+target = rsp.CompositeTarget([samplingtarget, modeltarget])
+inverse = rsp.InverseProblem(
+    groundwatermodel=gwf,
+    target=target,
+    regularization_weight=1.0,
+    maxiter=100,
+    relax=0.0,
+)
+inverse.formulate()
+inverse.nonlinear_solve()
+# %%
+# Now let's check the reconstructed head and compare with the original.
+
+rehead = head.copy(data=inverse.head.reshape(head.shape))
+
+fig, axes = plt.subplots(nrows=4, figsize=(10, 17))
+head.plot(ax=axes[0], levels=30)
+coarsehead.where(coarsehead["x"] < xhalf).plot(ax=axes[1], levels=30)
+axes[1].scatter(x=x, y=y, alpha=0.50, color="k")
+rehead.plot(ax=axes[2], levels=30)
+(rehead - head).plot(ax=axes[3])
+for ax in axes:
+    ax.set_aspect(1.0)
+
+# %%

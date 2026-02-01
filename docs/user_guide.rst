@@ -10,5 +10,4 @@ It is example based, and should give you an idea how to accomplish some tasks.
 
    examples/gwf.rst
    examples/interpolation.rst
-
-
+   examples/scaling.rst
