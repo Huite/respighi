@@ -28,7 +28,7 @@ class GridSampling(FittingTarget):
 
     def __init__(self, head: FloatArray, weights=None):
         hflat = head.ravel()
-        j = np.argwhere(np.isfinite(hflat))[0]
+        j = np.argwhere(np.isfinite(hflat)).ravel()
         nhead = len(j)
         i = np.arange(nhead)
         if weights is None:
