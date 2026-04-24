@@ -34,7 +34,7 @@ class GridSampling(FittingTarget):
         if weights is None:
             weights = np.ones(nhead)
         self.P = sparse.csr_matrix((weights, (i, j)), shape=(nhead, hflat.size))
-        self.d = head[j]
+        self.d = hflat[j]
 
 
 class CellSampling(FittingTarget):
