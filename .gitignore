@@ -2,6 +2,7 @@
 .pixi/
 !.pixi/config.toml
 *.pyc
+*__pycache__/
 
 examples/testdata/*
 
@@ -9,3 +10,5 @@ docs/examples
 docs/_build
 docs/api
 docs/sg_execution_times.rst
+
+case/*
