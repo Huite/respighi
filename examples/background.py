@@ -310,7 +310,9 @@ observation_sets = {
 }
 
 alpha = 1.0
-fig, axes = plt.subplots(nrows=2, ncols=len(observation_sets), figsize=(14, 5), sharex=True)
+fig, axes = plt.subplots(
+    nrows=2, ncols=len(observation_sets), figsize=(14, 5), sharex=True
+)
 
 for col, (label, obs_idx) in enumerate(observation_sets.items()):
     target_head = np.full(ncell, np.nan)
