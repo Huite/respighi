@@ -5,6 +5,7 @@ MODFLOW 6 Comparison
 This example compares the ``respighi.GroundwaterModel`` with
 MODFLOW 6 to check correctness.
 """
+# %%
 
 import numpy as np
 import xarray as xr
