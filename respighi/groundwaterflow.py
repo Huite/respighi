@@ -8,8 +8,6 @@ from respighi.constants import FloatArray, BoolArray
 from respighi.ilu0 import ILU0Preconditioner
 import pypardiso
 
-import xugrid as xu
-
 
 class Recharge:
     rate: FloatArray
@@ -200,7 +198,7 @@ class GroundwaterModel:
         converged, iterations = self.linearsolver.solve()
         if warn and not converged:
             warnings.warn(
-                f"Linear solver did not converge after {iterations} iterations."
+                f"Groundwater linear solver did not converge after {iterations} iterations."
             )
         return converged, iterations
 
