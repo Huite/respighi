@@ -92,6 +92,13 @@ class River:
         return
 
 
+def atleast_3d_front(a):
+    a = np.asarray(a)
+    while a.ndim < 3:
+        a = a[np.newaxis]
+    return a
+
+
 class GroundwaterModel:
     def __init__(
         self,
@@ -99,24 +106,46 @@ class GroundwaterModel:
         initial,
         recharge,
         head_boundaries,
-        transmissivity: FloatArray | None = None,
+        transmissivity: FloatArray,
+        resistance: FloatArray | None = None,
         xclose_linear: float = 1e-5,
         rclose_linear: float = 1e-5,
         maxiter_linear: int = 100,
         xclose: float = 1e-4,
         maxiter: int = 30,
     ):
+        transmissivity_3d = atleast_3d_front(transmissivity)
+        initial_3d = atleast_3d_front(initial)
+        if initial_3d.shape != transmissivity_3d.shape:
+            raise ValueError("Shapes of transmissivity and initial head do not match.")
+        nlayer, ny, nx = transmissivity_3d.shape
+        if resistance is None:
+            if nlayer != 1:
+                raise ValueError(
+                    "If resistance is not specified, transmissivity must be 2D or (1, ny, nx)."
+                )
+            resistance_3d = np.zeros((0, ny, nx))
+        else:
+            resistance_3d = atleast_3d_front(resistance)
+            nlayer_c, ny_c, nx_c = resistance_3d.shape
+            if nlayer_c != (nlayer - 1):
+                raise ValueError(
+                    "Resistance nlayer must equal transmissivity nlayer - 1"
+                )
+            if (ny_c != ny) or (nx_c != nx):
+                raise ValueError(
+                    "x, y sizes between transmissivity and resistance do not match."
+                )
+
         self.initial = initial.ravel()
         self.recharge = recharge
         self.head_boundaries = head_boundaries
 
         n = self.initial.size
-        if transmissivity is None:
-            self.transmissivity = np.ones(n)
-        else:
-            self.transmissivity = transmissivity
-
-        self.area = np.full(n, area)
+        self.layer_n = ny * nx
+        self.transmissivity = transmissivity_3d
+        self.resistance = resistance_3d
+        self.area = np.full(self.layer_n, area)
         self.n = n
         self.rhs = np.zeros(n)
         self.head = np.zeros(n)
@@ -124,7 +153,7 @@ class GroundwaterModel:
         self._update = np.empty_like(self.head)
 
         # Matrix assembly
-        self.W = self._build_connectivity(transmissivity)
+        self.W = self._build_conductance(transmissivity_3d, resistance_3d, self.area)
         # Compute the (weighted) degree matrix
         self.D = np.asarray(self.W.sum(axis=1)).ravel()
         self.hcof = self.D.copy()
@@ -144,14 +173,10 @@ class GroundwaterModel:
         self.maxiter = maxiter
         self.xclose = xclose
 
-    @staticmethod
-    def _build_connectivity(transmissivity):
-        # Get the Cartesian neighbors for a finite difference approximation.
-        # TODO: check order of dimensions with DataArray
-        shape = transmissivity.shape
+    @classmethod
+    def _build_connectivity(cls, shape):
         size = np.prod(shape)
         index = np.arange(size).reshape(shape)
-
         # Build nD connectivity
         ii = []
         jj = []
@@ -167,25 +192,48 @@ class GroundwaterModel:
 
         i = np.concatenate(ii)
         j = np.concatenate(jj)
+        return i, j
+
+    @classmethod
+    def _build_conductance(cls, transmissivity, resistance, area):
+        # Get the Cartesian neighbors for a finite difference approximation.
+        # TODO: check order of dimensions with DataArray
+        _, ny, nx = transmissivity.shape
+        size = transmissivity.size
+        layer_size = ny * nx
+        i, j = cls._build_connectivity(transmissivity.shape)
         kD = transmissivity.ravel()
-        # NOTE:
-        # Treat as serial resistances -> harmonic mean
-        # We assume dy == dx such that width and lengths cancel.
-        kDi = kD[i]
-        kDj = kD[j]
-        conductance = (2 * kDi * kDj) / (kDi + kDj)
+        c = resistance.ravel()
+
+        delta = abs(i - j)
+        horizontal = delta < layer_size
+        conductance = np.empty_like(i, dtype=float)
+        kDi = kD[i[horizontal]]
+        kDj = kD[j[horizontal]]
+        conductance[horizontal] = (2 * kDi * kDj) / (kDi + kDj)
+
+        if not horizontal.all():
+            vertical = ~horizontal
+            i_upper = np.minimum(i[vertical], j[vertical])
+            conductance[vertical] = area / c[i_upper]
+
         return sparse.coo_matrix((conductance, (i, j)), shape=(size, size)).tocsr()
 
     def formulate(self, recharge=True):
         # Reset
         self.rhs[:] = 0.0
         self.hcof[:] = self.D[:]
+
+        # Touch only the first layer
+        rhs = self.rhs[: self.layer_n]
+        hcof = self.hcof[: self.layer_n]
+        head = self.head[: self.layer_n]
+
         # Accumulate boundary conditions
         if recharge:
-            self.recharge.formulate(self.rhs, self.area)
-        head = self.head
+            self.recharge.formulate(rhs, self.area)
         for boundary in self.head_boundaries:
-            boundary.formulate(self.hcof, self.rhs, head)
+            boundary.formulate(hcof, rhs, head)
         return
 
     def direct_linear_solve(self):

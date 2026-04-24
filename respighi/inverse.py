@@ -119,10 +119,14 @@ class InverseProblem:
 
         # NOTE:
         # also assumes constant cell sizes, and dx == dy.
-        W = self.gwf.W.copy()
-        W.data[:] = 1.0
-        D = np.asarray(W.sum(axis=1)).ravel()  # Degree matrix
-        L = regularization_weight * (sparse.diags(D) - W)
+        layer_n = self.gwf.layer_n
+        ny, nx = self.gwf.transmissivity.shape[1:]
+        i, j = GroundwaterModel._build_connectivity((ny, nx))
+        W_2d = sparse.coo_matrix(
+            (np.ones(len(i)), (i, j)), shape=(layer_n, layer_n)
+        ).tocsr()
+        D_2d = np.asarray(W_2d.sum(axis=1)).ravel()  # Degree matrix
+        L = regularization_weight * (sparse.diags(D_2d) - W_2d)
         Lt = L.T
 
         Q = sparse.diags(self.gwf.area)
