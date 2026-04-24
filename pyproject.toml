@@ -36,7 +36,7 @@ path = "respighi/__init__.py"
 [tool.hatch.build.targets.sdist]
 only-include = ["respighi", "tests"]
 
-[tool.pixi.project]
+[tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["win-64", "linux-64", "osx-64"]
 
@@ -61,6 +61,7 @@ imod = ">=1.0.0.post1,<2"
 sphinx = ">=9.1.0,<10"
 pydata-sphinx-theme = ">=0.16.1,<0.17"
 sphinx-gallery = ">=0.20.0,<0.21"
+rioxarray = "*"
 
 [tool.pixi.tasks]
 docs = "sphinx-build docs docs/_build"
