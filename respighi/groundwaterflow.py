@@ -1,12 +1,12 @@
 import warnings
 
 import numpy as np
+import pypardiso
 from scipy import sparse
 
 from respighi.cg import PCGSolver
-from respighi.constants import FloatArray, BoolArray
+from respighi.constants import BoolArray, FloatArray
 from respighi.ilu0 import ILU0Preconditioner
-import pypardiso
 
 
 class Recharge:
@@ -153,7 +153,7 @@ class GroundwaterModel:
         self._update = np.empty_like(self.head)
 
         # Matrix assembly
-        self.W = self._build_conductance(transmissivity_3d, resistance_3d, self.area)
+        self.W = self._build_conductance(transmissivity_3d, resistance_3d, area)
         # Compute the (weighted) degree matrix
         self.D = np.asarray(self.W.sum(axis=1)).ravel()
         self.hcof = self.D.copy()

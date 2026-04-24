@@ -1,10 +1,10 @@
 import warnings
 
-from scipy import sparse
 import numpy as np
+from scipy import sparse
 
-from respighi.pardiso import PardisoWrapper
 from respighi.groundwaterflow import GroundwaterModel
+from respighi.pardiso import PardisoWrapper
 from respighi.target import FittingTarget
 
 
@@ -76,6 +76,7 @@ class InverseProblem:
         self.gwf = groundwatermodel
         self.target = target
         self.n = self.gwf.n
+        self.layer_n = self.gwf.layer_n
         self.regularization_weight = regularization_weight
         self.maxiter = maxiter
         self.maxdh = maxdh
@@ -92,6 +93,7 @@ class InverseProblem:
         self.At_diag_indices, self.A_diag_indices = self._extract_diagonal_indices()
         self.K.data[self.At_diag_indices] = self.gwf.hcof
         self.K.data[self.A_diag_indices] = self.gwf.hcof
+        self.rhs_flow_slice = slice(self.n + self.layer_n, 2 * self.n + self.layer_n)
 
     def _build_matrix(self, regularization_weight: float) -> sparse.csr_matrix:
         """Build optimality system matrix.
@@ -114,7 +116,14 @@ class InverseProblem:
         A.setdiag(np.inf)
         At = A.T
 
+        # Single layer is easier ...
+        # P = self.target.P
+        # Pt = P.T
+
         P = self.target.P
+        if P.shape[1] < self.n:
+            padding = sparse.csr_matrix((P.shape[0], self.n - P.shape[1]))
+            P = sparse.hstack([P, padding])
         Pt = P.T
 
         # NOTE:
@@ -129,12 +138,16 @@ class InverseProblem:
         L = regularization_weight * (sparse.diags(D_2d) - W_2d)
         Lt = L.T
 
-        Q = sparse.diags(self.gwf.area)
+        # Q = sparse.diags(self.gwf.area)  # Single layer is easier...
+        rows = np.arange(self.layer_n)
+        Q = sparse.coo_matrix(
+            (self.gwf.area, (rows, rows)), shape=(self.n, self.layer_n)
+        ).tocsr()
         Qt = Q.T
 
         n_obs = P.shape[0]
         I_e = sparse.eye(n_obs, format="csr")
-        I_s = sparse.eye(self.n, format="csr")
+        I_s = sparse.eye(self.layer_n, format="csr")
 
         return sparse.block_array(
             [
@@ -149,14 +162,13 @@ class InverseProblem:
         )
 
     def _build_rhs_vector(self) -> np.ndarray:
-        """Build right-hand side vector for system."""
         return np.concatenate(
             [
-                np.zeros(self.n),
-                np.zeros(self.n),
-                self.gwf.rhs,
-                self.target.d,
-                np.zeros(self.n),
+                np.zeros(self.n),  # h
+                np.zeros(self.layer_n),  # r
+                self.gwf.rhs,  # flow equation
+                self.target.d,  # observations
+                np.zeros(self.layer_n),  # s
             ]
         )
 
@@ -171,7 +183,7 @@ class InverseProblem:
         self.gwf.formulate(recharge=False)
         self.K.data[self.At_diag_indices] = self.gwf.hcof
         self.K.data[self.A_diag_indices] = self.gwf.hcof
-        self.rhs[2 * self.n : 3 * self.n] = self.gwf.rhs
+        self.rhs[self.rhs_flow_slice] = self.gwf.rhs
         return
 
     def formulate(self):
@@ -196,9 +208,7 @@ class InverseProblem:
         self.linearsolver.factorize()
 
     def linear_solve(self):
-        """
-        Solve the linear system for ``[h, r, λ]^T``.
-        """
+        """Solve the linear system for ``[h, r, λ]^T``."""
         if self.linearsolver is None:
             raise RuntimeError("Must call formulate() before solve")
         self.linearsolver.solve()
@@ -234,15 +244,13 @@ class InverseProblem:
 
     @property
     def head(self):
-        "Current estimate of head."
+        """Current estimate of head."""
         return self.x[: self.n]
 
     @property
     def recharge(self):
-        "Current estimate of recharge."
-        return self.x[self.n : 2 * self.n]
+        return self.x[self.n : self.n + self.layer_n]
 
     @property
     def lagrangian(self):
-        "Current estimate of Langrangian."
-        return self.x[-self.n :]
+        return self.x[-self.layer_n :]
