@@ -13,14 +13,14 @@ This examples show a synthetic example:
 """
 # %%
 
+import os
+
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 import xugrid as xu
-import matplotlib.pyplot as plt
 
 import respighi as rsp
-
-import os
 
 os.chdir("Z:/src/respighi/examples")
 

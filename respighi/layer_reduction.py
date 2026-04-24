@@ -1,6 +1,7 @@
 from typing import NamedTuple
-import numpy as np
+
 import numba as nb
+import numpy as np
 
 FloatArray = np.ndarray
 

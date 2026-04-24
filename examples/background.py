@@ -1,4 +1,4 @@
-"""
+r"""
 Theoretical background & 1D Example
 ===================================
 
@@ -225,8 +225,8 @@ In code with auxiliary variables, construct the system as::
 """
 
 # %%
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 import respighi as rsp
 

@@ -1,23 +1,20 @@
 __version__ = "0.0.1"
 
 from respighi.groundwaterflow import (
-    Recharge,
-    HeadBoundary,
     Drainage,
-    River,
     GroundwaterModel,
+    HeadBoundary,
+    Recharge,
+    River,
 )
-
+from respighi.inverse import InverseProblem
 from respighi.target import (
-    GridSampling,
     CellSampling,
+    CompositeTarget,
+    GridSampling,
     InterpolatedSampling,
     ModelTarget,
-    CompositeTarget,
 )
-
-from respighi.inverse import InverseProblem
-
 
 __all__ = (
     "Recharge",

@@ -1,8 +1,8 @@
 import ctypes
 
-from scipy import sparse
 import numpy as np
 import pypardiso
+from scipy import sparse
 
 from respighi.constants import FloatArray
 
