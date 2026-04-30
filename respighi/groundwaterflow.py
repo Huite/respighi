@@ -114,6 +114,28 @@ class GroundwaterModel:
         xclose: float = 1e-4,
         maxiter: int = 30,
     ):
+        """
+        Class for a confined groundwater flow model.
+
+        Parameters
+        ----------
+        area
+        initial
+        recharge
+        head_boundaries
+        transmissivity
+        resistance
+        xclose_linear: optional, float, default is 1e-5
+            Linear convergence criterion
+        rclose_linear: optional, float, default is 1e-5
+            Linear convergence criterion
+        maxiter_linear: int = 100,
+            Maximum number of linear solver iterations.
+        xclose: float = 1e-4,
+            Non-linear convergence criterion.
+        maxiter: int = 30,
+            Maximum number of non-linear iterations.
+        """
         transmissivity_3d = atleast_3d_front(transmissivity)
         initial_3d = atleast_3d_front(initial)
         if initial_3d.shape != transmissivity_3d.shape:
