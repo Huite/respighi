@@ -94,6 +94,9 @@ class InverseProblem:
         self.K.data[self.At_diag_indices] = self.gwf.hcof
         self.K.data[self.A_diag_indices] = self.gwf.hcof
         self.rhs_flow_slice = slice(self.n + self.layer_n, 2 * self.n + self.layer_n)
+        self.rhs_obs_slice = slice(
+            2 * self.n + self.layer_n, 2 * self.n + self.layer_n + len(target.d)
+        )
 
     def _build_matrix(self, regularization_weight: float) -> sparse.csr_matrix:
         """Build optimality system matrix.
@@ -140,8 +143,9 @@ class InverseProblem:
 
         # Q = sparse.diags(self.gwf.area)  # Single layer is easier...
         rows = np.arange(self.layer_n)
+        area = np.full(self.layer_n, self.gwf.area)
         Q = sparse.coo_matrix(
-            (self.gwf.area, (rows, rows)), shape=(self.n, self.layer_n)
+            (area, (rows, rows)), shape=(self.n, self.layer_n)
         ).tocsr()
         Qt = Q.T
 
@@ -179,33 +183,38 @@ class InverseProblem:
         inf_indices = np.where(np.isinf(self.K.data))[0]
         return inf_indices[: self.n], inf_indices[self.n :]
 
-    def _formulate_gwf(self):
-        self.gwf.formulate(recharge=False)
+    def _formulate_gwf(self, dt):
+        self.gwf.formulate(recharge=False, dt=dt)
         self.K.data[self.At_diag_indices] = self.gwf.hcof
         self.K.data[self.A_diag_indices] = self.gwf.hcof
         self.rhs[self.rhs_flow_slice] = self.gwf.rhs
         return
 
-    def formulate(self):
+    def formulate(self, dt=0.0):
         """
         Formulate the system of equations, call PARDISO's analysis (phase 11)
         and numerical factorization (phase 22).
         """
-        self._formulate_gwf()
+        self._formulate_gwf(dt=dt)
         self.linearsolver = PardisoWrapper(self.K, self.rhs, self.x)
         # Analysis is the most costly phase.
         self.linearsolver.analyze()
         self.linearsolver.factorize()
 
-    def reformulate(self):
+    def reformulate(self, dt=0.0):
         """
         Formulate the system of equations, call PARDISO's numerical
         factorization; unlike ``.formulate``, this does not call the expensive
         analysis phase.
         """
         # Structure is static, reuse results of analysis.
-        self._formulate_gwf()
+        self._formulate_gwf(dt=dt)
         self.linearsolver.factorize()
+
+    def update_observations(self, d):
+        if d.shape != self.target.d.shape:
+            raise ValueError("Observation size changed: rebuild instead.")
+        self.rhs[self.rhs_obs_slice] = d
 
     def linear_solve(self):
         """Solve the linear system for ``[h, r, λ]^T``."""
@@ -241,6 +250,16 @@ class InverseProblem:
             f"Final update: {maxdh:.2e}"
         )
         return False, self.maxiter
+
+    def run(self, dts, targets):
+        self.formulate()
+        out = []
+        for dt, target in zip(dts, targets):
+            self.update_observations(target.d)
+            self.reformulate(dt=dt)
+            self.nonlinear_solve()
+            out.append(self.head.copy())
+        return out
 
     @property
     def head(self):

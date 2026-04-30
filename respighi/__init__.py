@@ -4,6 +4,7 @@ from respighi.groundwaterflow import (
     Drainage,
     GroundwaterModel,
     HeadBoundary,
+    HorizontalFlowBarrier,
     Recharge,
     River,
 )
@@ -19,6 +20,7 @@ from respighi.target import (
 __all__ = (
     "Recharge",
     "HeadBoundary",
+    "HorizontalFlowBarrier",
     "Drainage",
     "River",
     "GroundwaterModel",

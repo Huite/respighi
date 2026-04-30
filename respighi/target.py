@@ -1,4 +1,5 @@
 import abc
+from copy import copy
 from dataclasses import dataclass
 
 import numpy as np
@@ -105,6 +106,12 @@ class ModelTarget(FittingTarget):
         row_sums[row_sums == 0] = 1.0
         self.P = sparse.diags(1.0 / row_sums) @ Wcsr
         self.d = head.to_numpy().ravel()
+
+    def update_head(self, head):
+        """Return a copy with new observations but reusing P."""
+        new = copy(self)
+        new.d = head.to_numpy().ravel()
+        return new
 
 
 class CompositeTarget(FittingTarget):
