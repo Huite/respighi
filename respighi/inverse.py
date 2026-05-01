@@ -78,7 +78,7 @@ class InverseProblem:
         self.x = np.zeros_like(self.rhs)
         self._x_old = np.zeros_like(self.rhs)
         self._x_update = np.zeros_like(self.rhs)
-        self._head_old = np.zeros(self.n)
+        self._head_iter = np.zeros(self.n)
         self._head_update = np.zeros(self.n)
         self.linearsolver = None
         # Extract diagonal indices for efficient Picard updates
@@ -281,9 +281,9 @@ class InverseProblem:
 
         for i in range(self.maxiter):
             np.copyto(dst=self._x_old, src=self.x)
-            np.copyto(dst=self._head_old, src=self._head)
+            np.copyto(dst=self._head_iter, src=self._head)
             self.linear_solve()
-            np.subtract(self._head, self._head_old, out=self._head_update)
+            np.subtract(self._head, self._head_iter, out=self._head_update)
             np.subtract(self.x, self._x_old, out=self._x_update)
             maxdh = np.linalg.norm(self._head_update, ord=np.inf)
             print(maxdh)
@@ -298,12 +298,15 @@ class InverseProblem:
         )
         return False, self.maxiter
 
-    def run(self, dts, targets):
+    def run(self, dts, targets, callback=None):
         """
         Run a transient or batched inverse solve over a sequence of time steps.
 
         Performs the expensive PARDISO analysis once, then iterates over time
         steps, updating observations and refactorizing at each step.
+
+        The optional ``callback`` is invoked before each step, allowing,
+        boundary conditions, or other model state to be updated in-place.
 
         Parameters
         ----------
@@ -311,16 +314,26 @@ class InverseProblem:
             Sequence of time step sizes.
         targets:
             Sequence of FittingTarget objects, one per time step.
+        callback:
+            Optional callable with signature ``callback(problem, i, dt)``,
+            where ``problem`` is the ``InverseProblem`` instance, ``i`` is
+            the zero-based step index, and ``dt`` is the current time step
+            size. Called at the start of each step, before refactorization.
 
         Returns
         -------
         list of np.ndarray
             Flat head arrays (length ``n``) after each time step.
         """
+        np.copyto(dst=self._head, src=self.gwf.initial)
         self.formulate()
         out = []
-        for dt, target in zip(dts, targets):
+        for i, (dt, target) in enumerate(zip(dts, targets)):
+            if callback is not None:
+                callback(self, i, dt)
             self.update_observations(target.d)
+            # Copy head to gwf._head_old for storage term formulation.
+            np.copyto(dst=self.gwf._head_old, src=self._head)
             self.reformulate(dt=dt)
             self.nonlinear_solve()
             out.append(self._head.copy())

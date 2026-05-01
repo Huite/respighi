@@ -568,22 +568,32 @@ class GroundwaterModel:
         )
         return False, self.maxiter
 
-    def run(self, dts):
+    def run(self, dts, callback=None):
         """
         Run a transient or batched simulation over a sequence of time steps.
 
         Resets the head to the initial condition, then advances the solution
         through each time step in ``dts`` using nonlinear Picard iteration.
+        Before each step, the optional ``callback`` is invoked, allowing
+        time-varying model state — recharge rates, boundary conditions, etc.,
+        to be updated in-place.
 
         Parameters
         ----------
         dts:
             Sequence of time step sizes (same units as storativity).
+        callback:
+            Optional callable with signature ``callback(model, i, dt)``,
+            where ``model`` is the ``GroundwaterModel`` instance, ``i`` is
+            the zero-based step index, and ``dt`` is the current time step
+            size. Called at the start of each step, before formulation.
         """
 
         np.copyto(dst=self._head, src=self.initial)
         out = []
-        for dt in dts:
+        for i, dt in enumerate(dts):
+            if callback is not None:
+                callback(self, i, dt)
             np.copyto(dst=self._head_old, src=self._head)
             converged, iters = self.nonlinear_solve(dt=dt)
             out.append(self._head.copy())
