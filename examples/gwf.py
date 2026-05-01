@@ -21,11 +21,8 @@ riverds = xr.open_dataset("testdata/river.nc").astype(np.float64)
 riverds = riverds.rename({"bottom": "bottom_elevation"})
 tubeds = xr.open_dataset("testdata/tube.nc").astype(np.float64)
 ditchds = xr.open_dataset("testdata/ditch.nc").astype(np.float64)
-olf = xr.open_dataarray("testdata/overlandflow.nc").astype(np.float64)
+olfds = xr.open_dataset("testdata/overlandflow.nc").astype(np.float64)
 transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float64)
-olfds = xr.Dataset()
-olfds["elevation"] = olf
-olfds["conductance"] = xr.full_like(olf, 500.0)
 
 # %%
 # Initialize the relevant boundary condition classes, initialize the
@@ -34,7 +31,7 @@ olfds["conductance"] = xr.full_like(olf, 500.0)
 river = rsp.River.from_dataset(riverds)
 ditch = rsp.Drainage.from_dataset(ditchds)
 tube = rsp.Drainage.from_dataset(tubeds)
-overlandflow = rsp.Drainage.from_dataset(olfds)
+overlandflow = rsp.Drainage.from_dataset(olfds, constant_conductance=500.0)
 recharge = rsp.Recharge(
     rate=xr.full_like(transmissivity, 0.001).to_numpy(),
 )
@@ -76,7 +73,7 @@ idomain = set_layer1(xr.ones_like(transmissivity, dtype=int))
 tubeds = set_layer1(tubeds)
 ditchds = set_layer1(ditchds)
 riverds = set_layer1(riverds)
-olf = set_layer1(olf)
+olf = set_layer1(olfds)
 transmissivity = set_layer1(transmissivity)
 rate = xr.full_like(transmissivity, 0.001)
 
@@ -102,8 +99,8 @@ gwf_model["ditch"] = imod.mf6.Drainage(
     conductance=ditchds["conductance"],
 )
 gwf_model["overland"] = imod.mf6.Drainage(
-    elevation=olf,
-    conductance=xr.full_like(olf, 500.0),
+    elevation=olf["elevation"],
+    conductance=xr.full_like(olf["elevation"], 500.0),
 )
 gwf_model["river"] = imod.mf6.River(
     conductance=riverds["conductance"],
@@ -161,3 +158,5 @@ ax.set_aspect(1.0)
 fig, ax = plt.subplots()
 (gwf.head.isel(layer=0) - mf6head).plot.imshow()
 ax.set_aspect(1.0)
+
+# %%
