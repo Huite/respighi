@@ -26,6 +26,12 @@ class Recharge:
         rhs += self._rhs
         return
 
+    @classmethod
+    def from_dataset(cls, dataset):
+        return cls(
+            rate=dataset["rate"].fillna(0.0).to_numpy(),
+        )
+
 
 class HeadBoundary:
     conductance: FloatArray
@@ -42,6 +48,13 @@ class HeadBoundary:
         np.multiply(self.conductance, self.head, out=self._rhs)
         rhs += self._rhs
         return
+
+    @classmethod
+    def from_dataset(cls, dataset):
+        return cls(
+            conductance=dataset["conductance"].fillna(0.0).to_numpy(),
+            head=dataset["head"].fillna(0.0).to_numpy(),
+        )
 
 
 class Drainage:
@@ -64,9 +77,55 @@ class Drainage:
         np.add(rhs, self._rhs, out=rhs, where=self._active)
         return
 
+    @classmethod
+    def from_dataset(cls, dataset):
+        return cls(
+            conductance=dataset["conductance"].fillna(0.0).to_numpy(),
+            elevation=dataset["elevation"].fillna(0.0).to_numpy(),
+        )
+
+
+class River:
+    conductance: FloatArray
+    stage: FloatArray
+    bottom_elevation: FloatArray
+    _fixed_rhs: FloatArray
+    _rhs: FloatArray
+    _fixed: BoolArray
+    _linear: BoolArray
+
+    def __init__(self, conductance, stage, bottom_elevation):
+        self.conductance = conductance.ravel()
+        self.stage = stage.ravel()
+        self.bottom_elevation = bottom_elevation.ravel()
+        self._fixed_rhs = self.conductance * (self.stage - self.bottom_elevation)
+        self._rhs = np.empty_like(self.conductance)
+        self._fixed = np.empty(self.conductance.shape, dtype=bool)
+        self._linear = np.empty(self.conductance.shape, dtype=bool)
+
+    def formulate(self, hcof, rhs, head):
+        # Fixed rate if head < bottom_elevation, linear otherwise.
+        np.less(head, self.bottom_elevation, out=self._fixed)
+        np.logical_not(self._fixed, out=self._linear)
+        # Fixed case: no hcof contribution, rhs += conductance * (stage - bottom_elevation)
+        np.add(rhs, self._fixed_rhs, out=rhs, where=self._fixed)
+        # Linear case: hcof += conductance, rhs += conductance * stage
+        np.add(hcof, self.conductance, out=hcof, where=self._linear)
+        np.multiply(self.conductance, self.stage, out=self._rhs)
+        np.add(rhs, self._rhs, out=rhs, where=self._linear)
+        return
+
+    @classmethod
+    def from_dataset(cls, dataset):
+        return cls(
+            conductance=dataset["conductance"].fillna(0.0).to_numpy(),
+            stage=dataset["stage"].fillna(0.0).to_numpy(),
+            bottom_elevation=dataset["bottom_elevation"].fillna(0.0).to_numpy(),
+        )
+
 
 class HorizontalFlowBarrier:
-    layer: IntArray
+    layer: IntArray  # TODO: 0-based indexing or 1-based? Currently 0-based.
     cell0: IntArray
     cell1: IntArray
     resistance: FloatArray
@@ -127,42 +186,10 @@ class HorizontalFlowBarrier:
         return [i, j], [j, i], [C_delta, C_delta]
 
 
-class River:
-    conductance: FloatArray
-    stage: FloatArray
-    bottom_elevation: FloatArray
-    _fixed_rhs: FloatArray
-    _rhs: FloatArray
-    _fixed: BoolArray
-    _linear: BoolArray
-
-    def __init__(self, conductance, stage, bottom_elevation):
-        self.conductance = conductance.ravel()
-        self.stage = stage.ravel()
-        self.bottom_elevation = bottom_elevation.ravel()
-        self._fixed_rhs = self.conductance * (self.stage - self.bottom_elevation)
-        self._rhs = np.empty_like(self.conductance)
-        self._fixed = np.empty(self.conductance.shape, dtype=bool)
-        self._linear = np.empty(self.conductance.shape, dtype=bool)
-
-    def formulate(self, hcof, rhs, head):
-        # Fixed rate if head < bottom_elevation, linear otherwise.
-        np.less(head, self.bottom_elevation, out=self._fixed)
-        np.logical_not(self._fixed, out=self._linear)
-        # Fixed case: no hcof contribution, rhs += conductance * (stage - bottom_elevation)
-        np.add(rhs, self._fixed_rhs, out=rhs, where=self._fixed)
-        # Linear case: hcof += conductance, rhs += conductance * stage
-        np.add(hcof, self.conductance, out=hcof, where=self._linear)
-        np.multiply(self.conductance, self.stage, out=self._rhs)
-        np.add(rhs, self._rhs, out=rhs, where=self._linear)
-        return
-
-
 def atleast_3d_front(a):
-    a = np.asarray(a)
+    a = np.array(a)
     while a.ndim < 3:
         a = a[np.newaxis]
-    # Make sure it's owned by the groudwater model and that it's not a view.
     return a.copy()
 
 
@@ -223,6 +250,20 @@ class GroundwaterModel:
         if initial_3d.shape != transmissivity_3d.shape:
             raise ValueError("Shapes of transmissivity and initial head do not match.")
         nlayer, ny, nx = transmissivity_3d.shape
+
+        if isinstance(transmissivity, xr.DataArray):
+            coords = dict(transmissivity.coords)
+            if "layer" not in coords:
+                coords["layer"] = [0]  # TODO(?): 0 or 1-based indexing
+            self._coords = coords
+        else:
+            dx = np.sqrt(area)
+            self._coords = {
+                "layer": np.arange(nlayer),
+                "y": np.flip(np.arange(0.0, ny * dx, dx)),
+                "x": np.arange(0.0, nx * dx, dx),
+            }
+
         if resistance is None:
             if nlayer != 1:
                 raise ValueError(
@@ -263,12 +304,12 @@ class GroundwaterModel:
         self.area = area
         self.n = n
         self.rhs = np.zeros(n)
-        self.head = self.initial.copy()
+        self._head = self.initial.copy()
         # Work arrays
-        self._head_old = self.head.copy()
-        self._head_iter = np.empty_like(self.head)
+        self._head_old = self._head.copy()
+        self._head_iter = np.empty_like(self._head)
         self._storage_work = np.empty_like(self.storativity)
-        self._update = np.empty_like(self.head)
+        self._update = np.empty_like(self._head)
 
         # Matrix assembly
         self.W = self._build_conductance(
@@ -288,7 +329,7 @@ class GroundwaterModel:
         self.linearsolver = PCGSolver(
             self.A,
             self.rhs,
-            self.head,
+            self._head,
             ILU0Preconditioner.from_csr_matrix(self.A),
             xclose=xclose_linear,
             rclose=rclose_linear,
@@ -377,7 +418,7 @@ class GroundwaterModel:
         # Touch only the first layer for boundary conditions
         rhs = self.rhs[: self.layer_n]
         hcof = self.hcof[: self.layer_n]
-        head = self.head[: self.layer_n]
+        head = self._head[: self.layer_n]
 
         # Accumulate boundary conditions
         if recharge:
@@ -388,7 +429,7 @@ class GroundwaterModel:
 
     def direct_linear_solve(self):
         self.A.setdiag(self.hcof)
-        self.head[:] = pypardiso.spsolve(self.A, self.rhs)
+        self._head[:] = pypardiso.spsolve(self.A, self.rhs)
         return
 
     def linear_solve(self, warn=True):
@@ -403,10 +444,10 @@ class GroundwaterModel:
     def nonlinear_solve(self, dt=0.0):
         """Solve nonlinear system using Picard iteration"""
         for i in range(self.maxiter):
-            np.copyto(self._head_iter, self.head)
+            np.copyto(self._head_iter, self._head)
             self.formulate(dt=dt)
             converged_linear, _ = self.linear_solve(warn=False)
-            np.subtract(self.head, self._head_iter, out=self._update)
+            np.subtract(self._head, self._head_iter, out=self._update)
             maxdx = np.linalg.norm(self._update, ord=np.inf)
             print(maxdx)
             if maxdx < self.xclose:
@@ -419,10 +460,17 @@ class GroundwaterModel:
         return False, self.maxiter
 
     def run(self, dts):
-        np.copyto(dst=self.head, src=self.initial)
+        np.copyto(dst=self._head, src=self.initial)
         out = []
         for dt in dts:
-            np.copyto(dst=self._head_old, src=self.head)
+            np.copyto(dst=self._head_old, src=self._head)
             converged, iters = self.nonlinear_solve(dt=dt)
-            out.append(self.head.copy())
+            out.append(self._head.copy())
         return out
+
+    @property
+    def head(self) -> xr.DataArray:
+        head_3d = self._head.reshape(self.transmissivity.shape)
+        return xr.DataArray(
+            head_3d, dims=("layer", "y", "x"), coords=self._coords, name="head"
+        )

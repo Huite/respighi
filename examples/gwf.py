@@ -18,41 +18,33 @@ import respighi as rsp
 # We load a number of boundary conditions, prepared as netCDF.
 
 riverds = xr.open_dataset("testdata/river.nc").astype(np.float64)
+riverds = riverds.rename({"bottom": "bottom_elevation"})
 tubeds = xr.open_dataset("testdata/tube.nc").astype(np.float64)
 ditchds = xr.open_dataset("testdata/ditch.nc").astype(np.float64)
 olf = xr.open_dataarray("testdata/overlandflow.nc").astype(np.float64)
 transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float64)
+olfds = xr.Dataset()
+olfds["elevation"] = olf
+olfds["conductance"] =xr.full_like(olf, 500.0)
 
 # %%
 # Initialize the relevant boundary condition classes, initialize the
 # groundwater model, formulate, then solve.
 
-river = rsp.River(
-    conductance=riverds["conductance"].fillna(0.0).to_numpy(),
-    stage=riverds["stage"].fillna(0.0).to_numpy(),
-    elevation=riverds["bottom"].fillna(0.0).to_numpy(),
-)
-ditch = rsp.Drainage(
-    conductance=ditchds["conductance"].fillna(0.0).to_numpy(),
-    elevation=ditchds["elevation"].fillna(0.0).to_numpy(),
-)
-overlandflow = rsp.Drainage(
-    conductance=xr.full_like(olf, 500.0).to_numpy(),
-    elevation=olf.to_numpy(),
-)
-tube = rsp.Drainage(
-    conductance=tubeds["conductance"].fillna(0.0).to_numpy(),
-    elevation=tubeds["elevation"].fillna(0.0).to_numpy(),
-)
+river = rsp.River.from_dataset(riverds)
+ditch = rsp.Drainage.from_dataset(ditchds)
+tube = rsp.Drainage.from_dataset(tubeds)
+overlandflow=rsp.Drainage.from_dataset(olfds)
 recharge = rsp.Recharge(
     rate=xr.full_like(transmissivity, 0.001).to_numpy(),
 )
 gwf = rsp.GroundwaterModel(
     area=25.0 * 25.0,
-    initial=xr.full_like(transmissivity, 0.0).to_numpy(),
+    initial=xr.full_like(transmissivity, 0.0),
     recharge=recharge,
     head_boundaries=[river, ditch, tube, overlandflow],
-    transmissivity=transmissivity.to_numpy(),
+    transmissivity=transmissivity,
+    storativity=xr.full_like(transmissivity, 0.15),
     xclose=1e-6,
     maxiter=50,
 )
@@ -63,9 +55,7 @@ gwf.nonlinear_solve()
 # Let's check the result.
 
 fig, ax = plt.subplots()
-head = transmissivity.copy(data=gwf.head.reshape(transmissivity.shape))
-head.name = "Head"
-head.plot(levels=30, ax=ax)
+gwf.head.plot(levels=30, ax=ax)
 ax.set_aspect(1.0)
 
 # %%
@@ -118,7 +108,7 @@ gwf_model["overland"] = imod.mf6.Drainage(
 gwf_model["river"] = imod.mf6.River(
     conductance=riverds["conductance"],
     stage=riverds["stage"],
-    bottom_elevation=riverds["bottom"],
+    bottom_elevation=riverds["bottom_elevation"],
 )
 gwf_model["ic"] = imod.mf6.InitialConditions(start=0.0)
 gwf_model["npf"] = imod.mf6.NodePropertyFlow(
@@ -169,5 +159,5 @@ ax.set_aspect(1.0)
 # than expected from the the non-linear tolerance of the solvers.
 
 fig, ax = plt.subplots()
-(head - mf6head).plot.imshow()
+(gwf.head.isel(layer=0) - mf6head).plot.imshow()
 ax.set_aspect(1.0)

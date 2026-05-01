@@ -1,6 +1,7 @@
 import warnings
 
 import numpy as np
+import xarray as xr
 from scipy import sparse
 
 from respighi.groundwaterflow import GroundwaterModel
@@ -234,9 +235,9 @@ class InverseProblem:
 
         for i in range(self.maxiter):
             np.copyto(dst=self._x_old, src=self.x)
-            np.copyto(dst=self._head_old, src=self.head)
+            np.copyto(dst=self._head_old, src=self._head)
             self.linear_solve()
-            np.subtract(self.head, self._head_old, out=self._head_update)
+            np.subtract(self._head, self._head_old, out=self._head_update)
             np.subtract(self.x, self._x_old, out=self._x_update)
             maxdh = np.linalg.norm(self._head_update, ord=np.inf)
             print(maxdh)
@@ -258,18 +259,39 @@ class InverseProblem:
             self.update_observations(target.d)
             self.reformulate(dt=dt)
             self.nonlinear_solve()
-            out.append(self.head.copy())
+            out.append(self._head.copy())
         return out
 
     @property
-    def head(self):
+    def _head(self):
         """Current estimate of head."""
         return self.x[: self.n]
 
     @property
-    def recharge(self):
+    def _recharge(self):
         return self.x[self.n : self.n + self.layer_n]
 
     @property
-    def lagrangian(self):
+    def _lagrangian(self):
         return self.x[-self.layer_n :]
+
+    def _datarray_helper(self, data: np.ndarray):
+        return xr.DataArray(
+            data, dims=("layer", "y", "x"), coords=self._coords, name="head"
+        )
+
+    @property
+    def head(self):
+        return self._datarray_helper(self._head.reshape(self.gwf.transmissivity.shape))
+
+    @property
+    def recharge(self):
+        return self._datarray_helper(
+            self._recharge.reshape(self.gwf.transmissivity.shape[1:])
+        )
+
+    @property
+    def lagrangian(self):
+        return self._datarray_helper(
+            self._lagrangian.reshape(self.gwf.transmissivity.shape[1:])
+        )
