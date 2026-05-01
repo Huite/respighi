@@ -14,6 +14,12 @@ from respighi.ilu0 import ILU0Preconditioner
 
 
 class Recharge:
+    """
+    Spatially distributed recharge boundary condition.
+
+    Adds a source term to the RHS: ``rhs += rate * area``.
+    """
+
     rate: FloatArray
     _rhs: FloatArray
 
@@ -34,6 +40,13 @@ class Recharge:
 
 
 class HeadBoundary:
+    """
+    Fixed-head  boundary condition.
+
+    Adds a conductance term to the diagonal and a corresponding RHS contribution,
+    driving the head toward the specified boundary head value.
+    """
+
     conductance: FloatArray
     head: FloatArray
     _rhs: FloatArray
@@ -58,6 +71,14 @@ class HeadBoundary:
 
 
 class Drainage:
+    """
+    Drainage boundary condition.
+
+    Active only where the computed head exceeds the drain elevation. When active,
+    behaves like a head boundary at the drain elevation; otherwise contributes
+    nothing to the system.
+    """
+
     conductance: FloatArray
     elevation: FloatArray
     _rhs: FloatArray
@@ -86,6 +107,14 @@ class Drainage:
 
 
 class River:
+    """
+    River boundary condition.
+
+    Linear (head-dependent) when head is above the river bottom elevation:
+    flux = conductance * (stage - head). Fixed rate when head drops below the
+    bottom elevation: flux = conductance * (stage - bottom_elevation).
+    """
+
     conductance: FloatArray
     stage: FloatArray
     bottom_elevation: FloatArray
@@ -203,7 +232,7 @@ class GroundwaterModel:
         transmissivity: FloatArray,
         resistance: FloatArray | None = None,
         storativity: FloatArray | None = None,
-        horizontal_flow_barriers: Sequence[HorizontalFlowBarrier] | tuple = (),
+        horizontal_flow_barriers: Sequence[HorizontalFlowBarrier] = (),
         xclose_linear: float = 1e-5,
         rclose_linear: float = 1e-5,
         maxiter_linear: int = 100,
@@ -232,8 +261,9 @@ class GroundwaterModel:
         storativity: np.ndarray of floats, optional
             May be shaped ``(ny, nx)`` for a single layer model;
             or shaped ``(nlayer, ny, nx``) for multi-layer models.
-        horizontal_flow_barriers: sequence of HorizontalFlowBarriers, optional
-            Horizontal flow barriers.
+        horizontal_flow_barriers: sequence of HorizontalFlowBarrier, optional
+            Horizontal flow barriers. These are static in time: the modification
+            to intercell conductances is made at model initialization.
         xclose_linear: optional, float, default is 1e-5
             Linear convergence criterion
         rclose_linear: optional, float, default is 1e-5
@@ -339,7 +369,17 @@ class GroundwaterModel:
         self.xclose = xclose
 
     @classmethod
-    def _build_connectivity(cls, shape):
+    def build_connectivity(cls, shape):
+        """
+        Return the row and column indices of all nearest-neighbour pairs for a
+        grid of the given shape.
+
+        Connections are built along every axis, so for a ``(nlayer, ny, nx)``
+        grid this covers horizontal (x, y) and vertical (layer) neighbours.
+        Each pair appears twice — once in each direction — yielding a symmetric
+        sparsity pattern suitable for the conductance matrix.
+        """
+
         size = np.prod(shape)
         index = np.arange(size).reshape(shape)
         # Build nD connectivity
@@ -363,12 +403,24 @@ class GroundwaterModel:
     def _build_conductance(
         cls, transmissivity, resistance, area, horizontal_flow_barriers
     ):
+        """
+        Assemble the weighted adjacency matrix of internodal conductances.
+
+        Horizontal conductances between cells i and j use the harmonic mean of
+        transmissivities: ``C_ij = 2*kDi*kDj / (kDi + kDj)``. Vertical
+        conductances between layers use ``C = area / resistance``. Horizontal
+        flow barriers apply a negative correction via duplicate COO entries.
+
+        Returns a CSR sparse matrix of shape ``(n, n)`` where ``n`` is the total
+        number of cells.
+        """
+
         # Get the Cartesian neighbors for a finite difference approximation.
         # TODO: check order of dimensions with DataArray
         _, ny, nx = transmissivity.shape
         size = transmissivity.size
         layer_size = ny * nx
-        i, j = cls._build_connectivity(transmissivity.shape)
+        i, j = cls.build_connectivity(transmissivity.shape)
         kD = transmissivity.ravel()
         c = resistance.ravel()
 
@@ -402,6 +454,21 @@ class GroundwaterModel:
         ).tocsr()
 
     def formulate(self, recharge=True, dt=0.0):
+        """
+        Assemble the RHS vector and diagonal (hcof) for the current iteration.
+
+        Resets RHS and diagonal to their base values, then accumulates
+        contributions from storage (if ``dt > 0``), recharge, and all head
+        boundaries. A ``dt`` of 0.0 encodes steady-state behaviour — no storage
+        term is added.
+
+        Parameters
+        ----------
+        recharge:
+            Whether to include the recharge boundary condition.
+        dt:
+            Time step size. Set to 0.0 for steady state.
+        """
         # Reset
         self.rhs[:] = 0.0
         self.hcof[:] = self.D[:]
@@ -428,11 +495,35 @@ class GroundwaterModel:
         return
 
     def direct_linear_solve(self):
+        """
+        Solve the linear system directly using PARDISO.
+
+        Updates ``_head`` in-place. Prefer this over ``linear_solve`` for
+        problems where the iterative PCG solver struggles to converge, at the
+        cost of higher memory usage.
+        """
         self.A.setdiag(self.hcof)
         self._head[:] = pypardiso.spsolve(self.A, self.rhs)
         return
 
     def linear_solve(self, warn=True):
+        """
+        Solve the linear system iteratively using preconditioned conjugate gradients.
+
+        Updates ``_head`` in-place via the PCG solver with ILU0 preconditioning.
+
+        Parameters
+        ----------
+        warn:
+            Whether to emit a warning if the solver does not converge.
+
+        Returns
+        -------
+        converged: bool
+            Whether the solver met the convergence criterion.
+        iterations: int
+            Number of iterations taken.
+        """
         self.A.setdiag(self.hcof)
         converged, iterations = self.linearsolver.solve()
         if warn and not converged:
@@ -442,7 +533,25 @@ class GroundwaterModel:
         return converged, iterations
 
     def nonlinear_solve(self, dt=0.0):
-        """Solve nonlinear system using Picard iteration"""
+        """
+        Solve the nonlinear system using Picard iteration.
+
+        Repeatedly calls ``formulate`` and ``linear_solve`` until the
+        infinity-norm of the head update falls below ``xclose``, or
+        ``maxiter`` iterations are reached.
+
+        Parameters
+        ----------
+        dt:
+            Time step size. Set to 0.0 for steady state.
+
+        Returns
+        -------
+        converged: bool
+            Whether the solver met the convergence criterion.
+        iterations: int
+            Number of iterations taken.
+        """
         for i in range(self.maxiter):
             np.copyto(self._head_iter, self._head)
             self.formulate(dt=dt)
@@ -460,6 +569,18 @@ class GroundwaterModel:
         return False, self.maxiter
 
     def run(self, dts):
+        """
+        Run a transient or batched simulation over a sequence of time steps.
+
+        Resets the head to the initial condition, then advances the solution
+        through each time step in ``dts`` using nonlinear Picard iteration.
+
+        Parameters
+        ----------
+        dts:
+            Sequence of time step sizes (same units as storativity).
+        """
+
         np.copyto(dst=self._head, src=self.initial)
         out = []
         for dt in dts:
@@ -470,6 +591,13 @@ class GroundwaterModel:
 
     @property
     def head(self) -> xr.DataArray:
+        """
+        Current head as a labelled DataArray of shape ``(layer, y, x)``.
+
+        Coordinates are taken from the transmissivity DataArray if one was
+        provided at construction, otherwise synthesised from cell size and
+        grid dimensions.
+        """
         head_3d = self._head.reshape(self.transmissivity.shape)
         return xr.DataArray(
             head_3d, dims=("layer", "y", "x"), coords=self._coords, name="head"

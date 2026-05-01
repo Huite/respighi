@@ -35,13 +35,13 @@ horizontal dimension this may be written as the sinusoid
 
 .. math::
 
-    \\psi(x) = \\cos(kx), \\qquad k = \\frac{1}{L}.
+    \psi(x) = \cos(kx), \qquad k = \frac{1}{L}.
 
 The essential property of this choice is
 
 .. math::
 
-    \\frac{d^2 \\psi}{dx^2} = -k^2 \\psi.
+    \frac{d^2 \psi}{dx^2} = -k^2 \psi.
 
 With the convention k = 1/L, the parameter L is the inverse
 wavenumber, or horizontal curvature length scale.  The corresponding wavelength
@@ -49,7 +49,7 @@ is
 
 .. math::
 
-    \\lambda = \\frac{2\\pi}{k} = 2\\pi L.
+    \lambda = \frac{2\pi}{k} = 2\pi L.
 
 The sinusoid should be interpreted first as a representative horizontal mode,
 not as a claim that the physical boundary condition is literally sinusoidal.

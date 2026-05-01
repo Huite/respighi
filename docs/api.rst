@@ -21,6 +21,7 @@ Ground water flow
      HeadBoundary
      Drainage
      River
+     HorizontalFlowBarrier
 
 Fitting targets
 ---------------
@@ -40,3 +41,12 @@ Inverse problem
    :toctree: api/
 
     InverseProblem
+
+Layer reduction
+---------------
+
+.. autosummary::
+   :toctree: api/
+
+    effective_transmissivity
+

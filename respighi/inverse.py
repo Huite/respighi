@@ -53,15 +53,6 @@ class InverseProblem:
         Convergence tolerance for non-linear head updates (default: 1e-4)
     relax : float, optional
         Relaxation factor for Picard iteration (default: 0.0)
-
-    Attributes
-    ----------
-    head : ndarray
-        Current estimate of hydraulic head
-    recharge : ndarray
-        Current estimate of recharge rates
-    lagrangian : ndarray
-        Current estimate of Lagrange multipliers
     """
 
     def __init__(
@@ -120,10 +111,6 @@ class InverseProblem:
         A.setdiag(np.inf)
         At = A.T
 
-        # Single layer is easier ...
-        # P = self.target.P
-        # Pt = P.T
-
         P = self.target.P
         if P.shape[1] < self.n:
             padding = sparse.csr_matrix((P.shape[0], self.n - P.shape[1]))
@@ -131,10 +118,10 @@ class InverseProblem:
         Pt = P.T
 
         # NOTE:
-        # also assumes constant cell sizes, and dx == dy.
+        # Assumes constant cell sizes, and dx == dy.
         layer_n = self.gwf.layer_n
         ny, nx = self.gwf.transmissivity.shape[1:]
-        i, j = GroundwaterModel._build_connectivity((ny, nx))
+        i, j = GroundwaterModel.build_connectivity((ny, nx))
         W_2d = sparse.coo_matrix(
             (np.ones(len(i)), (i, j)), shape=(layer_n, layer_n)
         ).tocsr()
@@ -142,7 +129,6 @@ class InverseProblem:
         L = regularization_weight * (sparse.diags(D_2d) - W_2d)
         Lt = L.T
 
-        # Q = sparse.diags(self.gwf.area)  # Single layer is easier...
         rows = np.arange(self.layer_n)
         area = np.full(self.layer_n, self.gwf.area)
         Q = sparse.coo_matrix(
@@ -167,6 +153,13 @@ class InverseProblem:
         )
 
     def _build_rhs_vector(self) -> np.ndarray:
+        """
+        Build the RHS vector for the full optimality system.
+
+        Concatenates zero vectors for the adjoint equations, the groundwater
+        flow RHS (boundary conditions), the observation vector, and the
+        regularization RHS.
+        """
         return np.concatenate(
             [
                 np.zeros(self.n),  # h
@@ -178,13 +171,35 @@ class InverseProblem:
         )
 
     def _extract_diagonal_indices(self) -> tuple[np.ndarray, np.ndarray]:
-        """Extract diagonal indices for efficient Picard iteration updates.
-        Returns indices of A and At diagonals within the CSR data array.
+        """
+        Extract the CSR data indices of the A^T and A diagonals for efficient
+        Picard updates.
+
+        During ``_build_matrix``, the diagonals of both A and A^T are set to
+        ``inf`` as sentinels. This method locates those entries in the CSR data
+        array so that ``_formulate_gwf`` can patch them in-place without
+        rebuilding the matrix. The first ``n`` inf entries correspond to A^T
+        (upper block) and the second ``n`` to A (lower block), reflecting their
+        order in the block structure.
+
+        Returns
+        -------
+        at_indices: np.ndarray
+            CSR data indices of the A^T diagonal entries.
+        a_indices: np.ndarray
+            CSR data indices of the A diagonal entries.
         """
         inf_indices = np.where(np.isinf(self.K.data))[0]
         return inf_indices[: self.n], inf_indices[self.n :]
 
     def _formulate_gwf(self, dt):
+        """
+        Update the groundwater flow contributions in the optimality system.
+
+        Calls ``GroundwaterModel.formulate`` (without recharge, as recharge is
+        a free variable here), then patches the diagonal entries of ``A`` and
+        ``A^T`` in the block matrix and updates the flow equation RHS slice.
+        """
         self.gwf.formulate(recharge=False, dt=dt)
         self.K.data[self.At_diag_indices] = self.gwf.hcof
         self.K.data[self.A_diag_indices] = self.gwf.hcof
@@ -213,6 +228,17 @@ class InverseProblem:
         self.linearsolver.factorize()
 
     def update_observations(self, d):
+        """
+        Replace the observation vector in the RHS.
+
+        Useful for transient runs where observations change between time steps
+        without requiring a full rebuild of the system.
+
+        Parameters
+        ----------
+        d:
+            New observation vector. Must have the same shape as the original.
+        """
         if d.shape != self.target.d.shape:
             raise ValueError("Observation size changed: rebuild instead.")
         self.rhs[self.rhs_obs_slice] = d
@@ -228,8 +254,28 @@ class InverseProblem:
         """
         Solve the nonlinear system for ``[h, r, λ]^T`` using Picard iteration.
 
-        Call .formulate() first.
+        At each iteration, the linear system is solved and the head update is
+        checked for convergence. Convergence is assessed on head only —
+        specifically the infinity norm of the head change between iterations —
+        rather than on the full solution vector, since head is the physically
+        meaningful quantity and recharge and Lagrange multipliers are derived
+        from it. A relaxation factor (``relax``) can be applied to damp
+        oscillations if the iteration is slow to converge.
+
+        Call ``.formulate()`` before calling this method.
+
+        Parameters
+        ----------
+        (none)
+
+        Returns
+        -------
+        converged: bool
+            Whether the head update fell below ``maxdh``.
+        iterations: int
+            Number of iterations taken.
         """
+
         if self.linearsolver is None:
             raise RuntimeError("Must call formulate() before solve")
 
@@ -253,6 +299,24 @@ class InverseProblem:
         return False, self.maxiter
 
     def run(self, dts, targets):
+        """
+        Run a transient or batched inverse solve over a sequence of time steps.
+
+        Performs the expensive PARDISO analysis once, then iterates over time
+        steps, updating observations and refactorizing at each step.
+
+        Parameters
+        ----------
+        dts:
+            Sequence of time step sizes.
+        targets:
+            Sequence of FittingTarget objects, one per time step.
+
+        Returns
+        -------
+        list of np.ndarray
+            Flat head arrays (length ``n``) after each time step.
+        """
         self.formulate()
         out = []
         for dt, target in zip(dts, targets):
@@ -264,34 +328,45 @@ class InverseProblem:
 
     @property
     def _head(self):
-        """Current estimate of head."""
+        """Current head estimate; the first ``n`` entries of the solution vector."""
         return self.x[: self.n]
 
     @property
     def _recharge(self):
+        """Current recharge estimate; entries ``n`` to ``n + layer_n`` of the solution vector."""
         return self.x[self.n : self.n + self.layer_n]
 
     @property
     def _lagrangian(self):
+        """Current Lagrange multipliers; the final ``layer_n`` entries of the solution vector."""
         return self.x[-self.layer_n :]
-
-    def _datarray_helper(self, data: np.ndarray):
-        return xr.DataArray(
-            data, dims=("layer", "y", "x"), coords=self._coords, name="head"
-        )
 
     @property
     def head(self):
-        return self._datarray_helper(self._head.reshape(self.gwf.transmissivity.shape))
+        """Head estimate as a labelled DataArray of shape ``(layer, y, x)``."""
+        return xr.DataArray(
+            data=self._head.reshape(self.gwf.transmissivity.shape),
+            dims=("layer", "y", "x"),
+            coords=self.gwf._coords,
+            name="head",
+        )
 
     @property
     def recharge(self):
-        return self._datarray_helper(
-            self._recharge.reshape(self.gwf.transmissivity.shape[1:])
+        """Recharge estimate as a labelled DataArray of shape ``(y, x)``."""
+        return xr.DataArray(
+            data=self._recharge.reshape(self.gwf.transmissivity.shape[1:]),
+            dims=("y", "x"),
+            coords={"y": self.gwf._coords["y"], "x": self.gwf._coords["x"]},
+            name="recharge",
         )
 
     @property
     def lagrangian(self):
-        return self._datarray_helper(
-            self._lagrangian.reshape(self.gwf.transmissivity.shape[1:])
+        """Lagrange multipliers as a labelled DataArray of shape ``(y, x)``."""
+        return xr.DataArray(
+            self._lagrangian.reshape(self.gwf.transmissivity.shape[1:]),
+            dims=("y", "x"),
+            coords={"y": self.gwf._coords["y"], "x": self.gwf._coords["x"]},
+            name="lagrangian",
         )
