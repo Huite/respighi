@@ -25,7 +25,7 @@ olf = xr.open_dataarray("testdata/overlandflow.nc").astype(np.float64)
 transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float64)
 olfds = xr.Dataset()
 olfds["elevation"] = olf
-olfds["conductance"] =xr.full_like(olf, 500.0)
+olfds["conductance"] = xr.full_like(olf, 500.0)
 
 # %%
 # Initialize the relevant boundary condition classes, initialize the
@@ -34,7 +34,7 @@ olfds["conductance"] =xr.full_like(olf, 500.0)
 river = rsp.River.from_dataset(riverds)
 ditch = rsp.Drainage.from_dataset(ditchds)
 tube = rsp.Drainage.from_dataset(tubeds)
-overlandflow=rsp.Drainage.from_dataset(olfds)
+overlandflow = rsp.Drainage.from_dataset(olfds)
 recharge = rsp.Recharge(
     rate=xr.full_like(transmissivity, 0.001).to_numpy(),
 )
