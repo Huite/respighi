@@ -107,6 +107,25 @@ class HorizontalFlowBarrier:
             resistance=resistance,
         )
 
+    def modify_conductance(self, transmissivity: FloatArray):
+        _, ny, nx = transmissivity.shape
+        layer_size = ny * nx
+        if self.cell0.max() > layer_size:
+            raise ValueError("HFB cell0 index exceeds number of cells in a layer")
+        if self.cell1.max() > layer_size:
+            raise ValueError("HFB cell1 index exceeds number of cells in a layer")
+        # Utilize a negative correction: duplicate summing of the COO matrix does the
+        # necessary work.
+        kD = transmissivity.ravel()
+        i = self.cell0 + self.layer * layer_size
+        j = self.cell1 + self.layer * layer_size
+        kDi = kD[i]
+        kDj = kD[j]
+        C_ij = (2 * kDi * kDj) / (kDi + kDj)
+        C_modified = C_ij / (1.0 + self.resistance * C_ij)
+        C_delta = C_modified - C_ij
+        return [i, j], [j, i], [C_delta, C_delta]
+
 
 class River:
     conductance: FloatArray
@@ -165,18 +184,29 @@ class GroundwaterModel:
         maxiter: int = 30,
     ):
         """
-        Class for a confined groundwater flow model.
+        Confined groundwater flow model.
 
         Parameters
         ----------
-        area
-        initial
-        recharge
-        head_boundaries
-        transmissivity
-        resistance: optional
-        storativity: optional
-        horizontal_flow_barriers: optional
+        area: float
+            Cell size area.
+        initial: np.ndarray of floats
+            Initial head.
+        recharge: Recharge
+            Recharge boundary condition.
+        head_boundaries: sequence
+            Boundaries such as drainage, river, (linear) head boundary.
+        transmissivity: np.ndarray of floats
+            May be shaped ``(ny, nx)`` for a single layer model;
+            or shaped ``(nlayer, ny, nx``) for multi-layer models.
+        resistance: np.ndarray of floats, optional
+            May be shaped ``(ny, nx)`` for a two layer model;
+            or shaped ``(nlayer - 1, ny, nx``) for more layers.
+        storativity: np.ndarray of floats, optional
+            May be shaped ``(ny, nx)`` for a single layer model;
+            or shaped ``(nlayer, ny, nx``) for multi-layer models.
+        horizontal_flow_barriers: sequence of HorizontalFlowBarriers, optional
+            Horizontal flow barriers.
         xclose_linear: optional, float, default is 1e-5
             Linear convergence criterion
         rclose_linear: optional, float, default is 1e-5
@@ -314,32 +344,21 @@ class GroundwaterModel:
             i_upper = np.minimum(i[vertical], j[vertical])
             conductance[vertical] = area / c[i_upper]
 
-        if horizontal_flow_barriers:
-            i_all = [i]
-            j_all = [j]
-            data_all = [conductance]
-            for hfb in horizontal_flow_barriers:
-                # Utilize a negative correction: duplicate summing of the COO matrix does the
-                # necessary work.
-                cell0 = hfb.cell0 + hfb.layer * layer_size
-                cell1 = hfb.cell1 + hfb.layer * layer_size
-                kDi = kD[cell0]
-                kDj = kD[cell1]
-                C_ij = (2 * kDi * kDj) / (kDi + kDj)
-                C_modified = C_ij / (1.0 + hfb.resistance * C_ij)
-                C_delta = C_modified - C_ij
-                i_all.extend([cell0, cell1])
-                j_all.extend([cell1, cell0])
-                data_all.extend([C_delta, C_delta])
+        rows = [i]
+        columns = [j]
+        data = [conductance]
+        for hfb in horizontal_flow_barriers:
+            # Utilize a negative correction: duplicate summing of the COO matrix does the
+            # necessary work.
+            ij, ji, C_delta = hfb.modify_conductance(transmissivity)
+            rows.extend(ij)
+            columns.extend(ji)
+            data.extend(C_delta)
 
-            rows = np.concatenate(i_all)
-            columns = np.concatenate(j_all)
-            data = np.concatenate(data_all)
-            return sparse.coo_matrix(
-                (data, (rows, columns)), shape=(size, size)
-            ).tocsr()
-        else:
-            return sparse.coo_matrix((conductance, (i, j)), shape=(size, size)).tocsr()
+        return sparse.coo_matrix(
+            (np.concatenate(data), (np.concatenate(rows), np.concatenate(columns))),
+            shape=(size, size),
+        ).tocsr()
 
     def formulate(self, recharge=True, dt=0.0):
         # Reset
