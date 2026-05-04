@@ -9,7 +9,10 @@ from respighi.groundwaterflow import (
     River,
 )
 from respighi.inverse import InverseProblem
-from respighi.layer_reduction import effective_transmissivity
+from respighi.layer_reduction import (
+    effective_transmissivity,
+    two_layer_effective_transmisivity,
+)
 from respighi.target import (
     CellSampling,
     CompositeTarget,
@@ -32,4 +35,5 @@ __all__ = (
     "CompositeTarget",
     "InverseProblem",
     "effective_transmissivity",
+    "two_layer_effective_transmisivity",
 )

@@ -66,7 +66,10 @@ aquifers can follow the reference aquifer more closely.
 import matplotlib.pyplot as plt
 import numpy as np
 
-from respighi.layer_reduction import effective_transmissivity
+from respighi.layer_reduction import (
+    effective_transmissivity,
+    two_layer_effective_transmisivity,
+)
 
 # %%
 
@@ -605,3 +608,68 @@ ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
 # %%
+# Two effective layers
+# --------------------
+
+T = np.array([100.0, 200.0, 300.0, 400.0])
+c_inter = np.array([600.0, 700.0, 800.0])
+c_all = 10 ** np.arange(-2, 6.1, 0.1)
+T_test = np.array([100.0, 200.0])
+
+Tas = []
+Tbs = []
+cabs = []
+for c_test in c_all:
+    c = c_inter.copy()
+    c[0] = c_test
+    Ta, Tb, cab = two_layer_effective_transmisivity(T, c, 100.0, 1_000.0, 10_000.0)
+    Tas.append(Ta)
+    Tbs.append(Tb)
+    cabs.append(cab)
+
+Tas = np.asarray(Tas)
+Tbs = np.asarray(Tbs)
+cabs = np.asarray(cabs)
+
+fig, (ax1, ax2) = plt.subplots(
+    2, 1, figsize=(10, 9), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
+)
+
+Tas = np.asarray(Tas)
+Tbs = np.asarray(Tbs)
+cabs = np.asarray(cabs)
+
+ax1.set_xscale("log")
+ax1.plot(
+    c_all,
+    Tas,
+    label=r"$T_a = T_\mathrm{eff}(L_\mathrm{local})$",
+    color=OKABE_ITO["blue"],
+)
+ax1.plot(
+    c_all,
+    Tas + Tbs,
+    label=r"$T_a + T_b = T_\mathrm{eff}(L_\mathrm{large})$",
+    color=OKABE_ITO["bluish_green"],
+)
+ax1.plot(c_all, Tbs, label=r"$T_b$", color=OKABE_ITO["orange"])
+
+ax1.axhline(y=T[0], color="r", label=r"$T_0$", ls="dashed")
+ax1.axhline(y=np.sum(T), color="k", label=r"$\sum T$", ls="dashed")
+
+ax1.set_ylabel(r"Transmissivity [m$^2$/d]")
+ax1.legend()
+ax1.grid(True, which="both", alpha=0.3)
+
+# --- equivalent resistance ---
+ax2.set_xscale("log")
+ax2.set_yscale("log")
+ax2.plot(c_all, cabs, label=r"$c_{ab}$", color=OKABE_ITO["blue"])
+
+ax2.set_xlabel(r"Resistance $c_0$ [d]")
+ax2.set_ylabel(r"$c_{ab}$ [d]")
+ax2.legend()
+ax2.grid(True, which="both", alpha=0.3)
+
+plt.tight_layout()
+plt.show()

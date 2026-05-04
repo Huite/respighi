@@ -131,3 +131,16 @@ def effective_transmissivity(
     out = _teff_grid(T_flat, c_flat, k_sq_flat)
 
     return out.reshape(grid_shape) if grid_shape else float(out[0])
+
+
+def two_layer_effective_transmisivity(
+    T, c, L_local=100.0, L_mid=1_000.0, L_large=10_000.0
+):
+    T_a = effective_transmissivity(T, c, L_local)
+    T_mid = effective_transmissivity(T, c, L_mid)
+    T_large = effective_transmissivity(T, c, L_large)
+    T_b = T_large - T_a
+    delta_mid = T_mid - T_a
+    k_mid_sq = 1.0 / L_mid**2
+    c_ab = (T_b / delta_mid - 1.0) / (k_mid_sq * T_b)
+    return T_a, T_b, c_ab
