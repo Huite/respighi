@@ -102,7 +102,9 @@ class Drainage:
     def from_dataset(cls, dataset, constant_conductance=None):
         elevation = dataset["elevation"]
         if constant_conductance is not None:
-            conductance=xr.full_like(elevation, constant_conductance).where(elevation.notnull())
+            conductance = xr.full_like(elevation, constant_conductance).where(
+                elevation.notnull()
+            )
         else:
             conductance = dataset["conductance"]
 
