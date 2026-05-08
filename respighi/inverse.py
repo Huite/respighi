@@ -432,6 +432,12 @@ class InverseProblem:
         return Phi
 
     def boundary_influence_functions(self):
+        """
+        Compute head influence functions for all head boundaries.
+
+        Column k gives psi_k = dh / d delta_k, the sensitivity of the head
+        field to a conductance-and-sigma-weighted coherent shift of boundary k.
+        """
         if self.linearsolver is None:
             raise RuntimeError("Must call formulate() before influence estimation")
 
@@ -441,19 +447,19 @@ class InverseProblem:
 
         B = np.zeros((N, n_boundaries))
         for k, boundary in enumerate(self.gwf.head_boundaries):
-            B[flow_start : flow_start + self.n, k] = boundary.conductance.ravel()
+            B[flow_start : flow_start + self.n, k] = (
+                boundary.conductance.ravel() * boundary.sigma.ravel()
+            )
 
         X = self.linearsolver.solve_multi(B)
         return X[: self.n, :]
 
-    def estimate_variance(self, sigma_obs, sigma_bc):
-        sigma_bc = np.asarray(sigma_bc)
-        if sigma_bc.ndim == 0:
-            sigma_bc = np.full(len(self.gwf.head_boundaries), float(sigma_bc))
+    def estimate_variance(self, batch_size: int | None = None):
+        sigma_obs = self.target.sigma
 
-        Phi_obs = self.observation_influence_functions()
+        Phi_obs = self.observation_influence_functions(batch_size=batch_size)
         Phi_bc = self.boundary_influence_functions()
 
         var = np.sum((Phi_obs * sigma_obs) ** 2, axis=1)
-        var += np.sum((Phi_bc * sigma_bc) ** 2, axis=1)
+        var += np.sum(Phi_bc**2, axis=1)
         return var

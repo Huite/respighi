@@ -13,6 +13,14 @@ from respighi.linearsolvers.cg import PCGSolver
 from respighi.linearsolvers.ilu0 import ILU0Preconditioner
 
 
+def constant_helper(dataset, template_var, constant, name):
+    if constant is not None:
+        template = dataset[template_var]
+        return xr.full_like(template, constant).where(template.notnull())
+    else:
+        return dataset.get(name)
+
+
 class Recharge:
     """
     Spatially distributed recharge boundary condition.
@@ -50,11 +58,13 @@ class HeadBoundary:
     conductance: FloatArray
     head: FloatArray
     _rhs: FloatArray
+    sigma: FloatArray
 
-    def __init__(self, conductance, head):
+    def __init__(self, conductance, head, sigma=None):
         self.conductance = conductance.ravel()
         self.head = head.ravel()
         self._rhs = np.empty_like(self.conductance)
+        self.sigma = sigma
 
     def formulate(self, hcof, rhs, head):
         hcof += self.conductance
@@ -63,10 +73,12 @@ class HeadBoundary:
         return
 
     @classmethod
-    def from_dataset(cls, dataset):
+    def from_dataset(cls, dataset, constant_sigma=None):
+        sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
         return cls(
             conductance=dataset["conductance"].fillna(0.0).to_numpy(),
             head=dataset["head"].fillna(0.0).to_numpy(),
+            sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
         )
 
 
@@ -83,12 +95,14 @@ class Drainage:
     elevation: FloatArray
     _rhs: FloatArray
     _active: BoolArray
+    sigma: FloatArray
 
-    def __init__(self, conductance, elevation):
+    def __init__(self, conductance, elevation, sigma=None):
         self.conductance = conductance.ravel()
         self.elevation = elevation.ravel()
         self._rhs = np.empty_like(self.conductance)
         self._active = np.empty(self.conductance.shape, dtype=bool)
+        self.sigma = sigma
 
     def formulate(self, hcof, rhs, head):
         # Only active if elevation < head
@@ -99,18 +113,15 @@ class Drainage:
         return
 
     @classmethod
-    def from_dataset(cls, dataset, constant_conductance=None):
-        elevation = dataset["elevation"]
-        if constant_conductance is not None:
-            conductance = xr.full_like(elevation, constant_conductance).where(
-                elevation.notnull()
-            )
-        else:
-            conductance = dataset["conductance"]
-
+    def from_dataset(cls, dataset, constant_conductance=None, constant_sigma=None):
+        conductance = constant_helper(
+            dataset, "elevation", constant_conductance, "conductance"
+        )
+        sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
         return cls(
-            conductance=conductance.to_numpy(),
-            elevation=elevation.to_numpy(),
+            conductance=conductance.fillna(0.0).to_numpy(),
+            elevation=dataset["elevation"].fillna(0.0).to_numpy(),
+            sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
         )
 
 
@@ -130,8 +141,9 @@ class River:
     _rhs: FloatArray
     _fixed: BoolArray
     _linear: BoolArray
+    sigma: FloatArray
 
-    def __init__(self, conductance, stage, bottom_elevation):
+    def __init__(self, conductance, stage, bottom_elevation, sigma):
         self.conductance = conductance.ravel()
         self.stage = stage.ravel()
         self.bottom_elevation = bottom_elevation.ravel()
@@ -139,6 +151,7 @@ class River:
         self._rhs = np.empty_like(self.conductance)
         self._fixed = np.empty(self.conductance.shape, dtype=bool)
         self._linear = np.empty(self.conductance.shape, dtype=bool)
+        self.sigma = sigma
 
     def formulate(self, hcof, rhs, head):
         # Fixed rate if head < bottom_elevation, linear otherwise.
@@ -153,11 +166,13 @@ class River:
         return
 
     @classmethod
-    def from_dataset(cls, dataset):
+    def from_dataset(cls, dataset, constant_sigma=None):
+        sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
         return cls(
             conductance=dataset["conductance"].fillna(0.0).to_numpy(),
             stage=dataset["stage"].fillna(0.0).to_numpy(),
             bottom_elevation=dataset["bottom_elevation"].fillna(0.0).to_numpy(),
+            sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
         )
 
 

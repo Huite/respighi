@@ -28,7 +28,7 @@ class GridSampling(FittingTarget):
     Mostly useful for testing.
     """
 
-    def __init__(self, head: FloatArray, weights=None):
+    def __init__(self, head: FloatArray, weights=None, sigma=None):
         hflat = head.ravel()
         j = np.argwhere(np.isfinite(hflat)).ravel()
         nhead = len(j)
@@ -37,6 +37,7 @@ class GridSampling(FittingTarget):
             weights = np.ones(nhead)
         self.P = sparse.csr_matrix((weights, (i, j)), shape=(nhead, hflat.size))
         self.d = hflat[j]
+        self.sigma = sigma
 
 
 class CellSampling(FittingTarget):
@@ -49,6 +50,7 @@ class CellSampling(FittingTarget):
         head: FloatArray,
         grid: Ugrid2d,
         weights=None,
+        sigma=None,
     ):
         nhead = len(head)
         xy = np.column_stack((x, y))
@@ -58,6 +60,7 @@ class CellSampling(FittingTarget):
             weights = np.ones(nhead)
         self.P = sparse.csr_matrix((weights, (i, j)), shape=(nhead, grid.n_face))
         self.d = head
+        self.sigma = sigma
 
 
 class InterpolatedSampling(FittingTarget):
@@ -70,6 +73,7 @@ class InterpolatedSampling(FittingTarget):
         head: FloatArray,
         grid: Ugrid2d,
         weights=None,
+        sigma=None,
     ):
         nhead = len(head)
         xy = np.column_stack((x, y))
@@ -84,12 +88,13 @@ class InterpolatedSampling(FittingTarget):
             (barycentric_weights, (i, j)), shape=(nhead, grid.n_face)
         )
         self.d = head
+        self.sigma = sigma
 
 
 class ModelTarget(FittingTarget):
     """Fit to cell averages from a model."""
 
-    def __init__(self, head: xr.DataArray, grid: Ugrid2d, weights=None):
+    def __init__(self, head: xr.DataArray, grid: Ugrid2d, weights=None, sigma=None):
         # Create dummy grid for regridder API
         source = UgridDataArray.from_data(
             np.empty(grid.n_face), grid=grid, facet="face"
@@ -106,6 +111,7 @@ class ModelTarget(FittingTarget):
         row_sums[row_sums == 0] = 1.0
         self.P = sparse.diags(1.0 / row_sums) @ Wcsr
         self.d = head.to_numpy().ravel()
+        self.sigma = sigma
 
     def update_head(self, head):
         """Return a copy with new observations but reusing P."""
@@ -126,3 +132,5 @@ class CompositeTarget(FittingTarget):
                 raise ValueError(f"Incompatible grid sizes: {t.P.shape[1]} vs {n_cols}")
         self.P = sparse.vstack([t.P for t in targets], format="csr")
         self.d = np.concatenate([t.d for t in targets])
+        # TODO: check for Nones
+        self.sigma = np.concatenate([t.sigma for t in targets])
