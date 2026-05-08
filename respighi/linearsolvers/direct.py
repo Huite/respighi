@@ -1,13 +1,64 @@
+import abc
 import ctypes
 
 import numpy as np
-import pypardiso
 from scipy import sparse
 
 from respighi.constants import FloatArray
 
 
-class PardisoWrapper:
+class DirectSolver(abc.ABC):
+    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
+        self.A = A
+        self.b = b
+        self.x = x
+
+    @abc.abstractmethod
+    def analyze(self): ...
+
+    @abc.abstractmethod
+    def factorize(self): ...
+
+    @abc.abstractmethod
+    def solve(self): ...
+
+    @abc.abstractmethod
+    def solve_multi(self, B: np.ndarray) -> np.ndarray: ...
+
+    @abc.abstractmethod
+    def free_memory(self): ...
+
+
+class ScipyWrapper(DirectSolver):
+    """
+    Wrapper around scipy.sparse.linalg.splu.
+    Pure-Python fallback, no native dependencies.
+    Slower than Pardiso/MUMPS but useful for testing or unsupported platforms.
+    """
+
+    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
+        self.A = A
+        self.b = b
+        self.x = x
+        self._lu = None
+
+    def analyze(self):
+        pass  # scipy combines analysis and factorization in splu
+
+    def factorize(self):
+        self._lu = sparse.linalg.splu(self.A.tocsc())
+
+    def solve(self):
+        self.x[:] = self._lu.solve(self.b)
+
+    def solve_multi(self, B: np.ndarray) -> np.ndarray:
+        return self._lu.solve(B)
+
+    def free_memory(self):
+        self._lu = None
+
+
+class PardisoWrapper(DirectSolver):
     """
     Wrapper around the PyPardisoSolver for more fine-grained control.
 
@@ -19,6 +70,8 @@ class PardisoWrapper:
     """
 
     def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
+        import pypardiso
+
         self.A = A
         self.b = b
         self.x = x
@@ -96,3 +149,79 @@ class PardisoWrapper:
 
     def free_memory(self):
         self.pardiso.free_memory()
+
+    def solve_multi(self, B: np.ndarray) -> np.ndarray:
+        """
+        Solve K X = B for multiple RHS columns simultaneously.
+        B: shape (N, k), Fortran-contiguous for PARDISO's column-major layout.
+        Returns X: shape (N, k).
+        """
+        assert B.ndim == 2 and B.shape[0] == self.A.shape[0]
+        B = np.asfortranarray(B, dtype=np.float64)
+        X = np.zeros_like(B, order="F")
+
+        c_float64_p = ctypes.POINTER(ctypes.c_double)
+
+        # Temporarily patch nrhs, b pointer, x pointer in args
+        args = self.args.copy()
+        args[10] = ctypes.byref(ctypes.c_int32(B.shape[1]))  # nrhs
+        args[13] = B.ctypes.data_as(c_float64_p)  # b
+        args[14] = X.ctypes.data_as(c_float64_p)  # x
+
+        self.call_pardiso(args, 33)
+        return X
+
+
+class MumpsWrapper(DirectSolver):
+    """
+    Wrapper around python-mumps.
+
+    Unlike pypardiso, python-mumps allows separate analyze, factorize,
+    and solve steps.
+
+    This exists, therefore, mostly to provide a consistent interface with
+    the PardisoWrapper.
+
+    Note that we assume the shared references to A, b, x are maintained
+    consistently!
+    """
+
+    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
+        import mumps
+
+        self.A = A
+        self.b = b
+        self.x = x
+        self.mumps = mumps.Context()
+
+    def analyze(self):
+        self.mumps.analyze(self.A)
+
+    def factorize(self):
+        self.mumps.factor(self.A)
+
+    def solve(self):
+        # mumps solves in-place; copy b into x so the result lands there
+        self.x[:] = self.b[:]
+        self.mumps.solve(b=self.x, overwrite_b=True)
+
+    def free_memory(self):
+        self.mumps.destroy()
+
+    def solve_multi(self, B: np.ndarray) -> np.ndarray:
+        assert B.ndim == 2 and B.shape[0] == self.A.shape[0]
+        X = np.array(B, dtype=np.float64, order="F")
+        self.mumps.solve(b=X, overwrite_b=True)
+        return X
+
+
+def make_direct_solver(solver_backend: str, A, b, x):
+    match solver_backend:
+        case "pardiso":
+            return PardisoWrapper(A, b, x)
+        case "mumps":
+            return MumpsWrapper(A, b, x)
+        case "scipy":
+            return ScipyWrapper(A, b, x)
+        case _:
+            raise ValueError(f"Unknown solver_backend: {solver_backend}")

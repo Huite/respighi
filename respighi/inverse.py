@@ -1,11 +1,13 @@
+import platform
 import warnings
+from typing import Literal
 
 import numpy as np
 import xarray as xr
 from scipy import sparse
 
 from respighi.groundwaterflow import GroundwaterModel
-from respighi.pardiso import PardisoWrapper
+from respighi.linearsolvers.direct import make_direct_solver
 from respighi.target import FittingTarget
 
 
@@ -63,7 +65,13 @@ class InverseProblem:
         maxiter: int = 30,
         maxdh=1e-4,
         relax=0.0,
+        solver_backend: Literal["pardiso", "mumps", "scipy"] | None = None,
     ):
+        # On macOS: Default to MUMPS instead of Intel Pardiso
+        if solver_backend is None:
+            solver_backend = "mumps" if platform.system() == "Darwin" else "pardiso"
+        self.solver_backend = solver_backend
+
         # Store core attributes
         self.gwf = groundwatermodel
         self.target = target
@@ -212,7 +220,9 @@ class InverseProblem:
         and numerical factorization (phase 22).
         """
         self._formulate_gwf(dt=dt)
-        self.linearsolver = PardisoWrapper(self.K, self.rhs, self.x)
+        self.linearsolver = make_direct_solver(
+            self.solver_backend, self.K, self.rhs, self.x
+        )
         # Analysis is the most costly phase.
         self.linearsolver.analyze()
         self.linearsolver.factorize()
@@ -383,3 +393,67 @@ class InverseProblem:
             coords={"y": self.gwf._coords["y"], "x": self.gwf._coords["x"]},
             name="lagrangian",
         )
+
+    def observation_influence_functions(
+        self,
+        batch_size: int | None = None,
+    ):
+        """
+        Estimate head variance contribution from observation uncertainty.
+
+        For each observation i, computes the influence function
+
+            phi_i = d h / d d_i
+
+        by solving the already-factorized KKT system with a unit perturbation in
+        the observation RHS row. The variance contribution is
+
+            v_h = sum_i sigma_i^2 * phi_i^2
+
+        """
+        if self.linearsolver is None:
+            raise RuntimeError("Must call formulate() before influence estimation")
+
+        n_obs = len(self.target.d)
+        N = len(self.rhs)
+        obs_rows = np.arange(self.rhs_obs_slice.start, self.rhs_obs_slice.stop)
+        if batch_size is None:
+            batch_size = n_obs
+
+        Phi = np.zeros((self.n, n_obs))
+        for start in range(0, n_obs, batch_size):
+            stop = min(start + batch_size, n_obs)
+            m = stop - start
+            B = np.zeros((N, m))
+            B[obs_rows[start:stop], np.arange(m)] = 1.0
+            X = self.linearsolver.solve_multi(B)
+            Phi[:, start:stop] = X[: self.n, :]
+
+        return Phi
+
+    def boundary_influence_functions(self):
+        if self.linearsolver is None:
+            raise RuntimeError("Must call formulate() before influence estimation")
+
+        N = len(self.rhs)
+        n_boundaries = len(self.gwf.head_boundaries)
+        flow_start = self.rhs_flow_slice.start
+
+        B = np.zeros((N, n_boundaries))
+        for k, boundary in enumerate(self.gwf.head_boundaries):
+            B[flow_start : flow_start + self.n, k] = boundary.conductance.ravel()
+
+        X = self.linearsolver.solve_multi(B)
+        return X[: self.n, :]
+
+    def estimate_variance(self, sigma_obs, sigma_bc):
+        sigma_bc = np.asarray(sigma_bc)
+        if sigma_bc.ndim == 0:
+            sigma_bc = np.full(len(self.gwf.head_boundaries), float(sigma_bc))
+
+        Phi_obs = self.observation_influence_functions()
+        Phi_bc = self.boundary_influence_functions()
+
+        var = np.sum((Phi_obs * sigma_obs) ** 2, axis=1)
+        var += np.sum((Phi_bc * sigma_bc) ** 2, axis=1)
+        return var

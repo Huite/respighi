@@ -8,9 +8,9 @@ import xarray as xr
 import xugrid as xu
 from scipy import sparse
 
-from respighi.cg import PCGSolver
 from respighi.constants import BoolArray, FloatArray, IntArray
-from respighi.ilu0 import ILU0Preconditioner
+from respighi.linearsolvers.cg import PCGSolver
+from respighi.linearsolvers.ilu0 import ILU0Preconditioner
 
 
 class Recharge:
