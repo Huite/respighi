@@ -37,7 +37,7 @@ class InverseProblem:
         - L: regularization operator (Laplacian)
         - α: regularization weight
 
-    The problem is solved using the Lagrangian approach with KKT conditions,
+    The problem is solved using the Lagrangian approach,
     forming a saddle-point system. Nonlinearity from head-dependent conductances
     is handled via Picard iteration.
 
@@ -405,7 +405,7 @@ class InverseProblem:
 
             phi_i = d h / d d_i
 
-        by solving the already-factorized KKT system with a unit perturbation in
+        by solving the already-factorized system with a unit perturbation in
         the observation RHS row. The variance contribution is
 
             v_h = sum_i sigma_i^2 * phi_i^2
@@ -455,11 +455,67 @@ class InverseProblem:
         return X[: self.n, :]
 
     def estimate_variance(self, batch_size: int | None = None):
-        sigma_obs = self.target.sigma
+        r"""
+        Estimate head variance from observation and boundary uncertainty.
 
+        Combines two sources of uncertainty via first-order linear error
+        propagation through the factorized system:
+
+        - Observation uncertainty: each piezometer contributes a variance
+        proportional to ``target.sigma[i]**2``, weighted by its influence
+        function ``phi_i = dh / dd_i``.
+        - Boundary uncertainty: each head boundary contributes a variance
+        from a spatially coherent shift, weighted by the conductance and
+        ``boundary.sigma`` fields, expressed as ``psi_k = dh / d delta_k``.
+
+        The total variance is:
+
+        .. math::
+
+            \text{Var}(\\mathbf{h}) =
+            \sum_i \sigma_i^2 \, \\boldsymbol{\phi}_i^2
+            + \sum_k \boldsymbol{\psi}_k^2
+
+        where :math:`\sigma_i` is already absorbed into :math:`\boldsymbol{\psi}_k`
+        via the conductance-sigma weighting in
+        :meth:`boundary_influence_functions`.
+
+        Observation and boundary errors are assumed mutually independent, so
+        their variance contributions add. All influence functions are computed
+        via multi-RHS solves reusing the existing PARDISO or MUMPS factorization; no
+        additional factorization is required.
+
+        .. note::
+
+            This is a first-order estimate, linearized around the converged
+            head solution. It captures uncertainty due to observation noise
+            and boundary condition uncertainty, but not structural model error
+            (e.g. transmissivity uncertainty, incorrect boundary placement).
+            The spatial pattern is therefore more reliable than the absolute
+            magnitudes, which depend on the physical calibration of
+            ``target.sigma`` and ``boundary.sigma``.
+
+        Parameters
+        ----------
+        batch_size : int, optional
+            Number of observation influence functions to solve simultaneously.
+            If None, all observations are solved in a single multi-RHS call.
+            Reduce this if memory is a concern for large observation sets.
+
+        Returns
+        -------
+        variance : xr.DataArray of shape (layer, y, x)
+            Pointwise head variance in units of head squared (m²), with the
+            same grid coordinates as the groundwater model.
+        """
+        sigma_obs = self.target.sigma
         Phi_obs = self.observation_influence_functions(batch_size=batch_size)
         Phi_bc = self.boundary_influence_functions()
-
         var = np.sum((Phi_obs * sigma_obs) ** 2, axis=1)
         var += np.sum(Phi_bc**2, axis=1)
-        return var
+        return xr.DataArray(
+            data=var.reshape(self.gwf.transmissivity.shape),
+            dims=("layer", "y", "x"),
+            coords=self.gwf._coords,
+            name="variance",
+        )

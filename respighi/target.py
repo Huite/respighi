@@ -131,6 +131,6 @@ class CompositeTarget(FittingTarget):
             if t.P.shape[1] != n_cols:
                 raise ValueError(f"Incompatible grid sizes: {t.P.shape[1]} vs {n_cols}")
         self.P = sparse.vstack([t.P for t in targets], format="csr")
-        self.d = np.concatenate([t.d for t in targets])
+        self.d = np.hstack([t.d for t in targets])
         # TODO: check for Nones
-        self.sigma = np.concatenate([t.sigma for t in targets])
+        self.sigma = np.hstack([t.sigma for t in targets])

@@ -117,7 +117,7 @@ class Drainage:
         conductance = constant_helper(
             dataset, "elevation", constant_conductance, "conductance"
         )
-        sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
+        sigma = constant_helper(dataset, "elevation", constant_sigma, "sigma")
         return cls(
             conductance=conductance.fillna(0.0).to_numpy(),
             elevation=dataset["elevation"].fillna(0.0).to_numpy(),

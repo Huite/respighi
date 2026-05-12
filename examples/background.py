@@ -83,7 +83,7 @@ Rearranging the first two equations:
 
     w_{reg} L_r^T L_r r - Q^T \lambda &= 0
 
-These give the symmetric KKT system shown below, where the (1,1) and (2,2) 
+These give the symmetric system shown below, where the (1,1) and (2,2) 
 blocks are P^T W P and L_r^T L_r respectively.
 
 .. math::
@@ -206,7 +206,7 @@ In code with auxiliary variables, construct the system as::
     I_s = sparse.eye(n)      # shape (N, N)
 
     # Block matrix structure
-    KKT = sparse.block_array([
+    K = sparse.block_array([
         #    h,     r,     e,              s,               lambda
         [None,  None,  w_obs * P.T,    None,            A.T  ],  # dL/dh
         [None,  None,  None,           w_reg * L_r.T,  -Q.T  ],  # dL/dr
