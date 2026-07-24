@@ -8,7 +8,7 @@ import xarray as xr
 import xugrid as xu
 from scipy import sparse
 
-from respighi.constants import BoolArray, FloatArray, IntArray
+from respighi.constants import FloatArray, IntArray
 from respighi.linearsolvers.cg import PCGSolver
 from respighi.linearsolvers.ilu0 import ILU0Preconditioner
 
@@ -58,7 +58,7 @@ class HeadBoundary:
     conductance: FloatArray
     head: FloatArray
     _rhs: FloatArray
-    sigma: FloatArray
+    sigma: None | FloatArray
 
     def __init__(self, conductance, head, sigma=None):
         self.conductance = conductance.ravel()
@@ -82,38 +82,71 @@ class HeadBoundary:
         )
 
 
+def _smoothstep_inplace(x, width, work):
+    """
+    Transform x in place from a signed distance to a threshold
+    (e.g. head - elevation) into a smoothed activation weight in [0, 1].
+
+    Uses the cubic Hermite smoothstep s(t) = 3t^2 - 2t^3, t = clip(x/width, 0, 1),
+    which is C1-continuous.
+
+    x and work are preallocated arrays of the same shape and x is overwritten as a result.
+    """
+    inv_width = 1.0 / width
+    np.multiply(x, inv_width, out=x)
+    np.clip(x, 0.0, 1.0, out=x)
+    np.multiply(x, x, out=work)  # work = t**2
+    np.multiply(x, -2.0, out=x)
+    np.add(x, 3.0, out=x)  # x = 3 - 2t
+    np.multiply(x, work, out=x)  # x = t**2 * (3 - 2t)
+
+
 class Drainage:
     """
     Drainage boundary condition.
-
-    Active only where the computed head exceeds the drain elevation. When active,
-    behaves like a head boundary at the drain elevation; otherwise contributes
-    nothing to the system.
+    Smoothly activates as head rises above the drain elevation, transitioning
+    from inactive to a head boundary at the drain elevation over an interval
+    `smoothing_width`, instead of switching discontinuously like the classical
+    Drainage package.
     """
 
     conductance: FloatArray
     elevation: FloatArray
+    _celev: FloatArray
+    _weight: FloatArray
     _rhs: FloatArray
-    _active: BoolArray
-    sigma: FloatArray
+    sigma: None | FloatArray
+    smoothing_width: float
 
-    def __init__(self, conductance, elevation, sigma=None):
+    def __init__(self, conductance, elevation, sigma=None, smoothing_width=0.01):
         self.conductance = conductance.ravel()
         self.elevation = elevation.ravel()
+        self._celev = self.conductance * self.elevation  # constant: C * elevation
+        self._weight = np.empty_like(self.conductance)
         self._rhs = np.empty_like(self.conductance)
-        self._active = np.empty(self.conductance.shape, dtype=bool)
         self.sigma = sigma
+        self.smoothing_width = smoothing_width
 
     def formulate(self, hcof, rhs, head):
-        # Only active if elevation < head
-        np.less(self.elevation, head, out=self._active)
-        np.add(hcof, self.conductance, out=hcof, where=self._active)
-        np.multiply(self.conductance, self.elevation, out=self._rhs)
-        np.add(rhs, self._rhs, out=rhs, where=self._active)
+        # weight = 0 well below elevation, 1 well above, smooth in between
+        np.subtract(head, self.elevation, out=self._weight)
+        _smoothstep_inplace(self._weight, self.smoothing_width, self._rhs)
+        # hcof += conductance * weight
+        np.multiply(self.conductance, self._weight, out=self._rhs)
+        np.add(hcof, self._rhs, out=hcof)
+        # rhs += conductance * elevation * weight
+        np.multiply(self._celev, self._weight, out=self._rhs)
+        np.add(rhs, self._rhs, out=rhs)
         return
 
     @classmethod
-    def from_dataset(cls, dataset, constant_conductance=None, constant_sigma=None):
+    def from_dataset(
+        cls,
+        dataset,
+        constant_conductance=None,
+        constant_sigma=None,
+        smoothing_width=0.01,
+    ):
         conductance = constant_helper(
             dataset, "elevation", constant_conductance, "conductance"
         )
@@ -122,57 +155,64 @@ class Drainage:
             conductance=conductance.fillna(0.0).to_numpy(),
             elevation=dataset["elevation"].fillna(0.0).to_numpy(),
             sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
+            smoothing_width=smoothing_width,
         )
 
 
 class River:
     """
     River boundary condition.
-
-    Linear (head-dependent) when head is above the river bottom elevation:
-    flux = conductance * (stage - head). Fixed rate when head drops below the
-    bottom elevation: flux = conductance * (stage - bottom_elevation).
+    Smoothly blends between fixed-rate flux (head at/below bottom_elevation)
+    and linear head-dependent flux (head above bottom_elevation), transitioning
+    over an interval `smoothing_width` instead of switching discontinuously like
+    the classical River package.
     """
 
     conductance: FloatArray
     stage: FloatArray
     bottom_elevation: FloatArray
     _fixed_rhs: FloatArray
+    _cbot: FloatArray
+    _weight: FloatArray
     _rhs: FloatArray
-    _fixed: BoolArray
-    _linear: BoolArray
-    sigma: FloatArray
+    sigma: None | FloatArray
+    smoothing_width: float
 
-    def __init__(self, conductance, stage, bottom_elevation, sigma):
+    def __init__(
+        self, conductance, stage, bottom_elevation, sigma=None, smoothing_width=0.01
+    ):
         self.conductance = conductance.ravel()
         self.stage = stage.ravel()
         self.bottom_elevation = bottom_elevation.ravel()
         self._fixed_rhs = self.conductance * (self.stage - self.bottom_elevation)
+        self._cbot = self.conductance * self.bottom_elevation
+        self._weight = np.empty_like(self.conductance)
         self._rhs = np.empty_like(self.conductance)
-        self._fixed = np.empty(self.conductance.shape, dtype=bool)
-        self._linear = np.empty(self.conductance.shape, dtype=bool)
         self.sigma = sigma
+        self.smoothing_width = smoothing_width
 
     def formulate(self, hcof, rhs, head):
-        # Fixed rate if head < bottom_elevation, linear otherwise.
-        np.less(head, self.bottom_elevation, out=self._fixed)
-        np.logical_not(self._fixed, out=self._linear)
-        # Fixed case: no hcof contribution, rhs += conductance * (stage - bottom_elevation)
-        np.add(rhs, self._fixed_rhs, out=rhs, where=self._fixed)
-        # Linear case: hcof += conductance, rhs += conductance * stage
-        np.add(hcof, self.conductance, out=hcof, where=self._linear)
-        np.multiply(self.conductance, self.stage, out=self._rhs)
-        np.add(rhs, self._rhs, out=rhs, where=self._linear)
+        # weight = 0 well below bottom_elevation (fixed), 1 well above (linear)
+        np.subtract(head, self.bottom_elevation, out=self._weight)
+        _smoothstep_inplace(self._weight, self.smoothing_width, self._rhs)
+        # hcof += conductance * weight
+        np.multiply(self.conductance, self._weight, out=self._rhs)
+        np.add(hcof, self._rhs, out=hcof)
+        # rhs += fixed_rhs + weight * conductance * bottom_elevation
+        np.add(rhs, self._fixed_rhs, out=rhs)
+        np.multiply(self._cbot, self._weight, out=self._rhs)
+        np.add(rhs, self._rhs, out=rhs)
         return
 
     @classmethod
-    def from_dataset(cls, dataset, constant_sigma=None):
+    def from_dataset(cls, dataset, constant_sigma=None, smoothing_width=0.01):
         sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
         return cls(
             conductance=dataset["conductance"].fillna(0.0).to_numpy(),
             stage=dataset["stage"].fillna(0.0).to_numpy(),
             bottom_elevation=dataset["bottom_elevation"].fillna(0.0).to_numpy(),
             sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
+            smoothing_width=smoothing_width,
         )
 
 

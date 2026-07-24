@@ -208,6 +208,7 @@ class InverseProblem:
         a free variable here), then patches the diagonal entries of ``A`` and
         ``A^T`` in the block matrix and updates the flow equation RHS slice.
         """
+        np.copyto(self.gwf._head, self._head)
         self.gwf.formulate(recharge=False, dt=dt)
         self.K.data[self.At_diag_indices] = self.gwf.hcof
         self.K.data[self.A_diag_indices] = self.gwf.hcof
