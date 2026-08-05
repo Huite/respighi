@@ -134,8 +134,12 @@ def effective_transmissivity(
 
 
 def two_layer_effective_transmisivity(
-    T, c, L_local=100.0, L_mid=1_000.0, L_large=10_000.0
-):
+    T: np.ndarray,
+    c: np.ndarray,
+    L_local: float = 100.0,
+    L_mid: float = 1_000.0,
+    L_large: float = 10_000.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     T_a = effective_transmissivity(T, c, L_local)
     T_mid = effective_transmissivity(T, c, L_mid)
     T_large = effective_transmissivity(T, c, L_large)
