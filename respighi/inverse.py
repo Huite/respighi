@@ -61,7 +61,7 @@ class InverseProblem:
         self,
         groundwatermodel: GroundwaterModel,
         target: FittingTarget,
-        regularization_weight: float,
+        regularization: float,
         maxiter: int = 30,
         maxdh=1e-4,
         relax=0.0,
@@ -77,11 +77,11 @@ class InverseProblem:
         self.target = target
         self.n = self.gwf.n
         self.layer_n = self.gwf.layer_n
-        self.regularization_weight = regularization_weight
+        self.regularization_weight = regularization
         self.maxiter = maxiter
         self.maxdh = maxdh
         self.relax = relax
-        self.K = self._build_matrix(regularization_weight)
+        self.K = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
         self.x = np.zeros_like(self.rhs)
         self._x_old = np.zeros_like(self.rhs)
@@ -98,7 +98,7 @@ class InverseProblem:
             2 * self.n + self.layer_n, 2 * self.n + self.layer_n + len(target.d)
         )
 
-    def _build_matrix(self, regularization_weight: float) -> sparse.csr_matrix:
+    def _build_matrix(self, regularization) -> sparse.csr_matrix:
         """Build optimality system matrix.
 
         Optimality conditions:
@@ -127,14 +127,10 @@ class InverseProblem:
 
         # NOTE:
         # Assumes constant cell sizes, and dx == dy.
-        layer_n = self.gwf.layer_n
         ny, nx = self.gwf.transmissivity.shape[1:]
-        i, j = GroundwaterModel.build_connectivity((ny, nx))
-        W_2d = sparse.coo_matrix(
-            (np.ones(len(i)), (i, j)), shape=(layer_n, layer_n)
-        ).tocsr()
-        D_2d = np.asarray(W_2d.sum(axis=1)).ravel()  # Degree matrix
-        L = regularization_weight * (sparse.diags(D_2d) - W_2d)
+        L = regularization.build_tikhonov_operator(
+            ny=ny, nx=nx, dx=np.sqrt(self.gwf.area)
+        )
         Lt = L.T
 
         rows = np.arange(self.layer_n)

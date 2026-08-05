@@ -70,14 +70,28 @@ transmissivity = xr.full_like(subsoil["kh"].isel(layer=0, drop=True), 10_000.0)
 # Initialize the relevant boundary condition classes, initialize the
 # groundwater model, formulate, then solve.
 
+
+WIDTH = 0.01
+
 transmissivity = xr.full_like(subsoil["kh"].isel(layer=0, drop=True), 3000.0)
 
-river = rsp.River.from_dataset(river_ds, constant_sigma=BOUNDARY_SIGMA)
-large_river = rsp.River.from_dataset(large_river_ds, constant_sigma=BOUNDARY_SIGMA)
-drain = rsp.Drainage.from_dataset(drain_ds, constant_sigma=BOUNDARY_SIGMA)
-tiledrain = rsp.Drainage.from_dataset(tiledrain_ds, constant_sigma=BOUNDARY_SIGMA)
+river = rsp.River.from_dataset(
+    river_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
+)
+large_river = rsp.River.from_dataset(
+    large_river_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
+)
+drain = rsp.Drainage.from_dataset(
+    drain_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
+)
+tiledrain = rsp.Drainage.from_dataset(
+    tiledrain_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
+)
 overlandflow = rsp.Drainage.from_dataset(
-    overlandflow_ds, constant_conductance=500.0, constant_sigma=BOUNDARY_SIGMA
+    overlandflow_ds,
+    constant_conductance=500.0,
+    constant_sigma=BOUNDARY_SIGMA,
+    smoothing_width=WIDTH,
 )
 recharge = rsp.Recharge(
     rate=xr.full_like(transmissivity, 0.001).to_numpy(),
@@ -111,8 +125,8 @@ gwf.head.isel(layer=0).plot.contour(levels=30)
 
 piezometers = gpd.read_file("../tmp-scripts/ibrahym-patch-piezometers.gpkg")
 piezometers = piezometers.loc[piezometers["mean_head"].notnull()]
-x = piezometers.geometry.x
-y = piezometers.geometry.y
+x = piezometers.geometry.x.to_numpy()
+y = piezometers.geometry.y.to_numpy()
 grid = xu.Ugrid2d.from_structured(modelhead)
 head = piezometers["mean_head"].to_numpy()
 sigma = np.full_like(head, PIEZOMETER_SIGMA)
@@ -124,13 +138,14 @@ target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=sigma)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization_weight=100.0,
-    maxiter=100,
-    relax=0.0,
+    regularization=rsp.UnscaledMinimumCurvature(100.0),
+    maxiter=30,
+    maxdh=0.001,
 )
 inverse.formulate()
 inverse.nonlinear_solve()
 
+# %%
 # %%
 # Let's check the resulting head.
 

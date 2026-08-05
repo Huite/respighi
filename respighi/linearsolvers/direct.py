@@ -125,7 +125,7 @@ class PardisoWrapper(DirectSolver):
         return args
 
     def call_pardiso(self, args: list, phase: int):
-        # Mutate the phase and include a fresh erro status, then call pardiso.
+        # Mutate the phase and include a fresh error status, then call pardiso.
         # A and b are assumed to be shared references, shared here and by
         # whatever is updating coefficients.
         pardiso_error = ctypes.c_int32(0)
@@ -170,6 +170,28 @@ class PardisoWrapper(DirectSolver):
 
         self.call_pardiso(args, 33)
         return X
+
+    def memory_usage(self) -> dict[str, float]:
+        """
+        Peak memory used by PARDISO, in MB.
+
+        Only meaningful after `analyze()` has been called (for the symbolic
+        factorization figures) and after `factorize()` (for the numerical
+        factorization figure) — call after the relevant phase(s) to get an
+        up-to-date reading.
+        """
+        iparm = self.pardiso.iparm
+        peak_symbolic_kb = iparm[14]
+        permanent_symbolic_kb = iparm[15]
+        numerical_kb = iparm[16]
+
+        return {
+            "peak_symbolic_mb": peak_symbolic_kb / 1024,
+            "permanent_symbolic_mb": permanent_symbolic_kb / 1024,
+            "numerical_factorization_mb": numerical_kb / 1024,
+            "peak_total_mb": max(peak_symbolic_kb, permanent_symbolic_kb + numerical_kb)
+            / 1024,
+        }
 
 
 class MumpsWrapper(DirectSolver):

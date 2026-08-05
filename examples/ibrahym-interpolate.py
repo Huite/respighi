@@ -131,7 +131,7 @@ target = rsp.CellSampling(x, y, headvalues, grid)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization_weight=1000.0,
+    regularization=rsp.UnscaledMinimumCurvature(1000.0),
     maxiter=100,
     relax=0.0,
 )

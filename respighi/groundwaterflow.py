@@ -301,6 +301,7 @@ class GroundwaterModel:
         maxiter_linear: int = 100,
         xclose: float = 1e-4,
         maxiter: int = 30,
+        relax: float = 0.0,
     ):
         """
         Confined groundwater flow model.
@@ -430,6 +431,7 @@ class GroundwaterModel:
         )
         self.maxiter = maxiter
         self.xclose = xclose
+        self.relax = relax
 
     @classmethod
     def build_connectivity(cls, shape):
@@ -624,6 +626,8 @@ class GroundwaterModel:
             print(maxdx)
             if maxdx < self.xclose:
                 return True, i + 1
+            if self.relax != 0.0:
+                self._head -= self.relax * self._update
 
         warnings.warn(
             f"Nonlinear solver did not converge after {self.maxiter} iterations. "

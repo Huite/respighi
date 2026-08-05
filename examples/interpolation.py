@@ -34,10 +34,14 @@ transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float
 # Initialize the relevant boundary condition classes, initialize the
 # groundwater model, formulate, then solve.
 
-river = rsp.River.from_dataset(riverds)
-ditch = rsp.Drainage.from_dataset(ditchds)
-tube = rsp.Drainage.from_dataset(tubeds)
-overlandflow = rsp.Drainage.from_dataset(olfds, constant_conductance=500.0)
+
+WIDTH = 1e-9
+river = rsp.River.from_dataset(riverds, smoothing_width=WIDTH)
+ditch = rsp.Drainage.from_dataset(ditchds, smoothing_width=WIDTH)
+tube = rsp.Drainage.from_dataset(tubeds, smoothing_width=WIDTH)
+overlandflow = rsp.Drainage.from_dataset(
+    olfds, constant_conductance=500.0, smoothing_width=WIDTH
+)
 
 # %%
 # To make the pattern slightly more interesting, we will create
@@ -60,7 +64,8 @@ gwf = rsp.GroundwaterModel(
     head_boundaries=[river, ditch, tube, overlandflow],
     transmissivity=transmissivity,
     xclose=1e-6,
-    maxiter=50,
+    maxiter=30,
+    relax=0.0,
 )
 gwf.formulate()
 gwf.nonlinear_solve()
@@ -69,7 +74,7 @@ gwf.nonlinear_solve()
 # Let's check the result.
 
 fig, ax = plt.subplots()
-head = gwf.head.isel(layer=0)
+head = gwf.head.isel(layer=0).copy()
 head.plot(levels=30, ax=ax)
 ax.set_aspect(1.0)
 
@@ -104,12 +109,13 @@ target = rsp.CellSampling(x, y, headvalues, grid)
 #
 # With the groundwater model and the target, we can pose an inverse problem to solve.
 
+gwf._head[:] = 0.0
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization_weight=1.0,
-    maxiter=100,
-    relax=0.0,
+    regularization=rsp.UnscaledMinimumCurvature(100.0),
+    maxiter=30,
+    relax=0.1,
 )
 
 # %%
@@ -134,6 +140,8 @@ axes[1].scatter(x=x, y=y, alpha=0.50, color="k")
 (rehead - head).plot(ax=axes[2])
 for ax in axes:
     ax.set_aspect(1.0)
+# %%
+
 
 # %%
 # Let's also check the recharge rates.
@@ -151,3 +159,25 @@ for ax in axes:
 fig, ax = plt.subplots(figsize=(10, 4))
 inverse.lagrangian.plot(ax=ax)
 ax.set_aspect(1.0)
+
+# %%
+
+inverse.linearsolver.memory_usage()
+
+# %%
+
+
+np.sqrt(np.prod(inverse.head.shape))
+
+# %%
+linearsolver = rsp.linearsolvers.direct.make_direct_solver(
+    "pardiso",
+    gwf.A,
+    gwf.rhs,
+    gwf._head,
+)
+linearsolver.analyze()
+linearsolver.factorize()
+
+# %%
+linearsolver.memory_usage()

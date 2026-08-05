@@ -122,7 +122,7 @@ target = rsp.ModelTarget(coarsehead, grid)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization_weight=1.0,
+    regularization=rsp.UnscaledMinimumCurvature(1.0),
     maxiter=100,
     relax=0.0,
 )
@@ -191,7 +191,7 @@ target = rsp.CompositeTarget([samplingtarget, modeltarget])
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization_weight=1.0,
+    regularization=rsp.UnscaledMinimumCurvature(1.0),
     maxiter=100,
     relax=0.0,
 )

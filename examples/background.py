@@ -6,9 +6,9 @@ This example demonstrates the inverse problem on a simple one-dimensional
 domain. It focuses on the mathematical formulation rather than a real-world
 application.
 
-We seek to estimate the steady-state phreatic surface h and spatially 
-distributed recharge r by combining sparse piezometer observations with 
-surface water boundary conditions, while enforcing the governing groundwater 
+We seek to estimate the steady-state phreatic surface h and spatially
+distributed recharge r by combining sparse piezometer observations with
+surface water boundary conditions, while enforcing the governing groundwater
 flow equation as a constraint.
 
 The discretized steady-state groundwater flow equation on a structured grid is:
@@ -33,10 +33,10 @@ where the objective function is:
 
 .. math::
 
-    J(h, r) = \frac{w_{obs}}{2} \|P h - d\|_{W}^{2} 
+    J(h, r) = \frac{w_{obs}}{2} \|P h - d\|_{W}^{2}
     + \frac{w_{reg}}{2} \|L_r r\|_2^{2}
 
-The sampling operator P extracts head values at the M observation locations, 
+The sampling operator P extracts head values at the M observation locations,
 and d contains the observed piezometer heads.
 
 The weighted norm is defined as:
@@ -45,7 +45,7 @@ The weighted norm is defined as:
 
     \|P h - d\|_{W}^{2} = (P h - d)^T W (P h - d)
 
-where W = diag(w_1, w_2, ..., w_M) is a diagonal matrix of observation weights. 
+where W = diag(w_1, w_2, ..., w_M) is a diagonal matrix of observation weights.
 Typical choices include:
 
 - w_i = 1/σ_i², where σ_i is the measurement uncertainty at location i
@@ -83,7 +83,7 @@ Rearranging the first two equations:
 
     w_{reg} L_r^T L_r r - Q^T \lambda &= 0
 
-These give the symmetric system shown below, where the (1,1) and (2,2) 
+These give the symmetric system shown below, where the (1,1) and (2,2)
 blocks are P^T W P and L_r^T L_r respectively.
 
 .. math::
@@ -103,14 +103,14 @@ blocks are P^T W P and L_r^T L_r respectively.
         b_{bc}
     \end{pmatrix}
 
-However, the blocks P^T W P and L_r^T L_r can become dense when P represents 
-coarse-to-fine observation mappings. When the observation operator P represents a coarse model on a fine grid, each 
-row of P may contain many nonzero entries. For example, if 100 fine cells map 
-to 1 coarse observation cell, each row of P has 100 nonzeros. The product 
-P^T W P densifies the (1,1) block, destroying sparsity and making direct 
+However, the blocks P^T W P and L_r^T L_r can become dense when P represents
+coarse-to-fine observation mappings. When the observation operator P represents a coarse model on a fine grid, each
+row of P may contain many nonzero entries. For example, if 100 fine cells map
+to 1 coarse observation cell, each row of P has 100 nonzeros. The product
+P^T W P densifies the (1,1) block, destroying sparsity and making direct
 solvers intractable for large problems.
 
-To preserve sparsity, we introduce auxiliary variables that split the quadratic 
+To preserve sparsity, we introduce auxiliary variables that split the quadratic
 terms:
 
 - e ∈ ℝ^M: observation residuals, e = P h - d
@@ -149,10 +149,10 @@ Taking derivatives with respect to each variable:
 
     \frac{\partial \mathcal{L}}{\partial r} &= L_r^T \mu_s - Q^T \lambda = 0
 
-    \frac{\partial \mathcal{L}}{\partial e} &= w_{obs} e - \mu_e = 0 
+    \frac{\partial \mathcal{L}}{\partial e} &= w_{obs} e - \mu_e = 0
     \quad \Rightarrow \quad \mu_e = w_{obs} e
 
-    \frac{\partial \mathcal{L}}{\partial s} &= w_{reg} s - \mu_s = 0 
+    \frac{\partial \mathcal{L}}{\partial s} &= w_{reg} s - \mu_s = 0
     \quad \Rightarrow \quad \mu_s = w_{reg} s
 
 Substituting the expressions for μ_e and μ_s into the first two equations:
@@ -163,7 +163,7 @@ Substituting the expressions for μ_e and μ_s into the first two equations:
 
     L_r^T (w_{reg} s) - Q^T \lambda &= 0
 
-Combining all optimality conditions and constraints yields the block-structured 
+Combining all optimality conditions and constraints yields the block-structured
 system:
 
 .. math::
@@ -195,8 +195,8 @@ Instead, all matrix blocks remain sparse:
 - A, Q: sparse PDE discretization matrices
 - w_obs P^T, w_reg L_r^T: weighted transposes, still sparse
 
-This maintains the sparse structure of the overall saddle-point system, enabling 
-efficient direct solvers (e.g., sparse LU factorization) even for larger 
+This maintains the sparse structure of the overall saddle-point system, enabling
+efficient direct solvers (e.g., sparse LU factorization) even for larger
 problems.
 
 In code with auxiliary variables, construct the system as::
@@ -321,7 +321,7 @@ for col, (label, obs_idx) in enumerate(observation_sets.items()):
     inverse = rsp.InverseProblem(
         groundwatermodel=gwf,
         target=target,
-        regularization_weight=alpha,
+        regularization=rsp.UnscaledRegularization(alpha),
     )
     inverse.formulate()
     inverse.linear_solve()
@@ -365,7 +365,7 @@ target = rsp.GridSampling(target_head)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization_weight=1.0,
+    regularization=rsp.UnscaledMinimumCurvature(1.0),
 )
 inverse.formulate()
 inverse.linear_solve()

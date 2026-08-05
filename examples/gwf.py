@@ -28,10 +28,12 @@ transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float
 # Initialize the relevant boundary condition classes, initialize the
 # groundwater model, formulate, then solve.
 
-river = rsp.River.from_dataset(riverds)
-ditch = rsp.Drainage.from_dataset(ditchds)
-tube = rsp.Drainage.from_dataset(tubeds)
-overlandflow = rsp.Drainage.from_dataset(olfds, constant_conductance=500.0)
+river = rsp.River.from_dataset(riverds, smoothing_width=1e-6)
+ditch = rsp.Drainage.from_dataset(ditchds, smoothing_width=1e-6)
+tube = rsp.Drainage.from_dataset(tubeds, smoothing_width=1e-6)
+overlandflow = rsp.Drainage.from_dataset(
+    olfds, constant_conductance=500.0, smoothing_width=1e-6
+)
 recharge = rsp.Recharge(
     rate=xr.full_like(transmissivity, 0.001).to_numpy(),
 )
