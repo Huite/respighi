@@ -1,32 +1,13 @@
 import abc
 import ctypes
+from enum import Enum
 
 import numpy as np
 from scipy import sparse
 
 from respighi.constants import FloatArray
-
-
-class DirectSolver(abc.ABC):
-    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
-        self.A = A
-        self.b = b
-        self.x = x
-
-    @abc.abstractmethod
-    def analyze(self): ...
-
-    @abc.abstractmethod
-    def factorize(self): ...
-
-    @abc.abstractmethod
-    def solve(self): ...
-
-    @abc.abstractmethod
-    def solve_multi(self, B: np.ndarray) -> np.ndarray: ...
-
-    @abc.abstractmethod
-    def free_memory(self): ...
+from respighi.linearsolvers.solvertypes import MatrixType, DirectSolver
+from respighi.linearsolvers.pardiso import PardisoWrapper
 
 
 class ScipyWrapper(DirectSolver):
@@ -58,142 +39,6 @@ class ScipyWrapper(DirectSolver):
         self._lu = None
 
 
-class PardisoWrapper(DirectSolver):
-    """
-    Wrapper around the PyPardisoSolver for more fine-grained control.
-
-    This does not re-allocate x, ia, ja every call and separates
-    analyze, formulate, and solve steps more cleanly.
-
-    Note that we assume the shared references to A, b, x are maintained
-    consistently!
-    """
-
-    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
-        import pypardiso
-
-        self.A = A
-        self.b = b
-        self.x = x
-        self.pardiso = pypardiso.PyPardisoSolver()
-        self.args = self.pardiso_args(self.pardiso, self.A, self.b, self.x)
-
-    @staticmethod
-    def pardiso_args(pardiso, A, b, x):
-        """
-        Create a (mutable!) cache (i.e. a list) of arguments.
-
-        When sparsity structure does not change, most data can be re-used for
-        repeated solves (e.g. Picard iteration).
-
-        Code here is taken almost verbatim from the
-        PyPardisSolver._call_pardiso method, where x, ia, ja, and all ctypes
-        objects are created on each call instead.
-        """
-        pardiso_error = ctypes.c_int32(0)
-        c_int32_p = ctypes.POINTER(ctypes.c_int32)
-        c_float64_p = ctypes.POINTER(ctypes.c_double)
-
-        # 1-based indexing
-        ia = A.indptr.astype(np.int32) + 1
-        ja = A.indices.astype(np.int32) + 1
-
-        args = [
-            pardiso.pt.ctypes.data_as(ctypes.POINTER(pardiso._pt_type[0])),  # pt
-            ctypes.byref(ctypes.c_int32(1)),  # maxfct
-            ctypes.byref(ctypes.c_int32(1)),  # mnum
-            ctypes.byref(
-                ctypes.c_int32(pardiso.mtype)
-            ),  # mtype -> 11 for real-nonsymetric
-            ctypes.byref(ctypes.c_int32(pardiso.phase)),  # phase -> 13
-            ctypes.byref(
-                ctypes.c_int32(A.shape[0])
-            ),  # N -> number of equations/size of matrix
-            A.data.ctypes.data_as(c_float64_p),  # A -> non-zero entries in matrix
-            ia.ctypes.data_as(c_int32_p),  # ia -> csr-indptr
-            ja.ctypes.data_as(c_int32_p),  # ja -> csr-indices
-            pardiso.perm.ctypes.data_as(c_int32_p),  # perm -> empty
-            ctypes.byref(ctypes.c_int32(1 if b.ndim == 1 else b.shape[1])),  # nrhs
-            pardiso.iparm.ctypes.data_as(c_int32_p),  # iparm-array
-            ctypes.byref(
-                ctypes.c_int32(pardiso.msglvl)
-            ),  # msg-level -> 1: statistical info is printed
-            b.ctypes.data_as(c_float64_p),  # b -> right-hand side vector/matrix
-            x.ctypes.data_as(c_float64_p),  # x -> output
-            ctypes.byref(pardiso_error),  # pardiso error
-        ]
-        return args
-
-    def call_pardiso(self, args: list, phase: int):
-        # Mutate the phase and include a fresh error status, then call pardiso.
-        # A and b are assumed to be shared references, shared here and by
-        # whatever is updating coefficients.
-        pardiso_error = ctypes.c_int32(0)
-        args[4] = ctypes.byref(ctypes.c_int32(phase))
-        args[-1] = ctypes.byref(pardiso_error)
-        self.pardiso._mkl_pardiso(*args)
-        if pardiso_error.value != 0:
-            raise RuntimeError(pardiso_error.value)
-
-    def analyze(self):
-        """Phase 11: Symbolic factorization"""
-        self.call_pardiso(self.args, 11)
-
-    def factorize(self):
-        """Phase 22: Numerical factorization"""
-        self.call_pardiso(self.args, 22)
-
-    def solve(self):
-        """Phase 33: Solve"""
-        self.call_pardiso(self.args, 33)
-
-    def free_memory(self):
-        self.pardiso.free_memory()
-
-    def solve_multi(self, B: np.ndarray) -> np.ndarray:
-        """
-        Solve K X = B for multiple RHS columns simultaneously.
-        B: shape (N, k), Fortran-contiguous for PARDISO's column-major layout.
-        Returns X: shape (N, k).
-        """
-        assert B.ndim == 2 and B.shape[0] == self.A.shape[0]
-        B = np.asfortranarray(B, dtype=np.float64)
-        X = np.zeros_like(B, order="F")
-
-        c_float64_p = ctypes.POINTER(ctypes.c_double)
-
-        # Temporarily patch nrhs, b pointer, x pointer in args
-        args = self.args.copy()
-        args[10] = ctypes.byref(ctypes.c_int32(B.shape[1]))  # nrhs
-        args[13] = B.ctypes.data_as(c_float64_p)  # b
-        args[14] = X.ctypes.data_as(c_float64_p)  # x
-
-        self.call_pardiso(args, 33)
-        return X
-
-    def memory_usage(self) -> dict[str, float]:
-        """
-        Peak memory used by PARDISO, in MB.
-
-        Only meaningful after `analyze()` has been called (for the symbolic
-        factorization figures) and after `factorize()` (for the numerical
-        factorization figure) — call after the relevant phase(s) to get an
-        up-to-date reading.
-        """
-        iparm = self.pardiso.iparm
-        peak_symbolic_kb = iparm[14]
-        permanent_symbolic_kb = iparm[15]
-        numerical_kb = iparm[16]
-
-        return {
-            "peak_symbolic_mb": peak_symbolic_kb / 1024,
-            "permanent_symbolic_mb": permanent_symbolic_kb / 1024,
-            "numerical_factorization_mb": numerical_kb / 1024,
-            "peak_total_mb": max(peak_symbolic_kb, permanent_symbolic_kb + numerical_kb)
-            / 1024,
-        }
-
-
 class MumpsWrapper(DirectSolver):
     """
     Wrapper around python-mumps.
@@ -208,19 +53,28 @@ class MumpsWrapper(DirectSolver):
     consistently!
     """
 
-    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
+    def __init__(
+        self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray, matrix_type=None
+    ):
         import mumps
+
+        if matrix_type is None:
+            matrix_type = MatrixType.NONSYMMETRIC
+
+        # Python-MUMPS currently only supports 0 (nonsymmetric) and 2 (symmetric, indefinite), not 1.
+        symmetric = not (matrix_type == matrix_type.NONSYMMETRIC)
 
         self.A = A
         self.b = b
         self.x = x
         self.mumps = mumps.Context()
+        self.mumps.set_matrix(A, symmetric=symmetric)
 
     def analyze(self):
-        self.mumps.analyze(self.A)
+        self.mumps.analyze()
 
     def factorize(self):
-        self.mumps.factor(self.A)
+        self.mumps.factor(self.A, reuse_analysis=True)
 
     def solve(self):
         # mumps solves in-place; copy b into x so the result lands there
@@ -237,12 +91,12 @@ class MumpsWrapper(DirectSolver):
         return X
 
 
-def make_direct_solver(solver_backend: str, A, b, x):
+def make_direct_solver(solver_backend: str, A, b, x, matrix_type=None):
     match solver_backend:
         case "pardiso":
-            return PardisoWrapper(A, b, x)
+            return PardisoWrapper(A, b, x, matrix_type)
         case "mumps":
-            return MumpsWrapper(A, b, x)
+            return MumpsWrapper(A, b, x, matrix_type)
         case "scipy":
             return ScipyWrapper(A, b, x)
         case _:
