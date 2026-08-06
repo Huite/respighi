@@ -173,7 +173,7 @@ class PardisoWrapper:
         if A.dtype != np.float64:
             raise TypeError(f"A must be float64, got {A.dtype}")
         if not A.has_sorted_indices:
-            A.sort_indices()  # unsorted indices give wrong results, not errors
+            raise ValueError("A has unsorted indices.")
         if not np.diff(A.indptr).all():
             raise ValueError("A has empty rows and is structurally singular")
         if A.indptr[-1] > np.iinfo(np.int32).max:
