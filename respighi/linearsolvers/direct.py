@@ -81,7 +81,12 @@ class MumpsWrapper(DirectSolver):
         self.mumps.destroy()
 
     def solve_multi(self, B: np.ndarray) -> np.ndarray:
-        assert B.ndim == 2 and B.shape[0] == self.A.shape[0]
+        if B.ndim != 2 or B.shape[0] != self.A.shape[0]:
+            raise ValueError(
+                "B must be 2D and the number of rows must match A. "
+                f"B shape: {B.shape}, versus A shape: {self.A.shape}"
+            )
+
         X = np.array(B, dtype=np.float64, order="F")
         self.mumps.solve(b=X, overwrite_b=True)
         return X
