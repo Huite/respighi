@@ -1,7 +1,8 @@
 from typing import NamedTuple
-from scipy.special import k1
-from scipy import sparse
+
 import numpy as np
+from scipy import sparse
+from scipy.special import k1
 
 from respighi.groundwaterflow import GroundwaterModel
 
@@ -66,9 +67,9 @@ class MaternSemivariogram(NamedTuple):
 
     def build_tikhonov_operator(self, ny: int, nx: int, dx: float) -> sparse.csr_matrix:
         L = graph_laplacian(ny, nx)
-        I = sparse.eye(L.shape[0], format="csr")
+        _I = sparse.eye(L.shape[0], format="csr")
         kappa_grid = self.kappa * dx
-        return (self.tau / dx) * (kappa_grid**2 * I + L)
+        return (self.tau / dx) * (kappa_grid**2 * _I + L)
 
 
 class UnscaledMinimumCurvature(NamedTuple):

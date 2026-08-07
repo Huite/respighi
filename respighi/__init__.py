@@ -8,11 +8,6 @@ from respighi.groundwaterflow import (
     Recharge,
     River,
 )
-from respighi.tikhonov import (
-    MaternSemivariogram,
-    MinimumCurvature,
-    UnscaledMinimumCurvature,
-)
 from respighi.inverse import InverseProblem
 from respighi.inverse_minres import InverseProblemMINRES
 from respighi.layer_reduction import (
@@ -25,6 +20,11 @@ from respighi.target import (
     GridSampling,
     InterpolatedSampling,
     ModelTarget,
+)
+from respighi.tikhonov import (
+    MaternSemivariogram,
+    MinimumCurvature,
+    UnscaledMinimumCurvature,
 )
 
 __all__ = (

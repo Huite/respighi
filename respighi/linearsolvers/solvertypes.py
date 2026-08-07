@@ -1,6 +1,8 @@
 import abc
 from enum import Enum
+
 from scipy import sparse
+
 from respighi.constants import FloatArray
 
 
@@ -34,7 +36,7 @@ class DirectSolver(abc.ABC):
     def solve(self): ...
 
     @abc.abstractmethod
-    def solve_multi(self, B: np.ndarray) -> np.ndarray: ...
+    def solve_multi(self, B: FloatArray) -> FloatArray: ...
 
     @abc.abstractmethod
     def free_memory(self): ...

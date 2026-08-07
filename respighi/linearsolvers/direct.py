@@ -1,13 +1,9 @@
-import abc
-import ctypes
-from enum import Enum
-
 import numpy as np
 from scipy import sparse
 
 from respighi.constants import FloatArray
-from respighi.linearsolvers.solvertypes import MatrixType, DirectSolver
 from respighi.linearsolvers.pardiso import PardisoWrapper
+from respighi.linearsolvers.solvertypes import DirectSolver, MatrixType
 
 
 class ScipyWrapper(DirectSolver):

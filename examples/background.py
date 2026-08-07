@@ -313,15 +313,16 @@ fig, axes = plt.subplots(
     nrows=2, ncols=len(observation_sets), figsize=(14, 5), sharex=True
 )
 
+original_head = gwf._head.copy()
 for col, (label, obs_idx) in enumerate(observation_sets.items()):
     target_head = np.full(ncell, np.nan)
-    target_head[obs_idx] = gwf._head[obs_idx]
+    target_head[obs_idx] = original_head[obs_idx]
     target = rsp.GridSampling(target_head)
 
     inverse = rsp.InverseProblem(
         groundwatermodel=gwf,
         target=target,
-        regularization=rsp.UnscaledRegularization(alpha),
+        regularization=rsp.UnscaledMinimumCurvature(alpha),
     )
     inverse.formulate()
     inverse.linear_solve()
@@ -331,7 +332,7 @@ for col, (label, obs_idx) in enumerate(observation_sets.items()):
 
     ax_h.plot(x, gwf._head, "k-", alpha=0.3, label="Truth")
     ax_h.plot(x, inverse._head, "C0-", label="Inverse")
-    ax_h.plot(x[obs_idx], gwf._head[obs_idx], "ko", ms=4, label="Observed")
+    ax_h.plot(x[obs_idx], original_head[obs_idx], "ko", ms=4, label="Observed")
     ax_h.set_title(label)
 
     ax_r.plot(x, true_recharge, "k-", alpha=0.3, label="Truth")
@@ -345,7 +346,6 @@ axes[0, -1].legend(fontsize="small")
 axes[1, -1].legend(fontsize="small")
 fig.suptitle(f"Effect of observation density ($\\alpha$ = {alpha})")
 fig.tight_layout()
-
 
 # %%
 # Lagrange multipliers

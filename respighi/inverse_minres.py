@@ -255,7 +255,7 @@ class InverseProblemMINRES:
             raise ValueError(f"Unknown subsolver: {self.subsolver}")
 
     def _build_r_block_solver(self):
-        """alpha R*R + rho Q^T Q with Q^T Q = area^2 I. Static across Picard."""
+        """Alpha R*R + rho Q^T Q with Q^T Q = area^2 I. Static across Picard."""
         mat = (
             self.alpha * self.RtR + self.rho * self.area**2 * sparse.eye(self.layer_n)
         ).tocsr()

@@ -146,7 +146,6 @@ inverse.formulate()
 inverse.nonlinear_solve()
 
 # %%
-# %%
 # Let's check the resulting head.
 
 inversehead = inverse.head.isel(layer=0)
