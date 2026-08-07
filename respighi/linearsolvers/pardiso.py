@@ -19,13 +19,11 @@ import os
 import site
 import sys
 from ctypes.util import find_library
-from enum import Enum
 
 import numpy as np
 from scipy import sparse
 
-from respighi.linearsolvers.solvertypes import MatrixType, DirectSolver
-
+from respighi.linearsolvers.solvertypes import DirectSolver, MatrixType
 
 _I = ctypes.c_int32  # LP64 interface. For ILP64 (pardiso_64) this is c_int64
 # and the index arrays below must be int64 to match.
@@ -90,7 +88,7 @@ def _load_mkl() -> ctypes.CDLL:
     raise ImportError("mkl_rt not found; set MKL_RT_PATH.")
 
 
-class PardisoWrapper:
+class PardisoWrapper(DirectSolver):
     def __init__(
         self,
         A: sparse.csr_matrix,
@@ -226,7 +224,8 @@ class PardisoWrapper:
         p[59] = 0  # iparm(60) in-core
 
         if self.matrix_type is MatrixType.SYMMETRIC_INDEFINITE:
-            p[9] = 8  # symmetric indefinite default perturbation, 1e-8
+            p[9] = 9  # symmetric indefinite perturbation, 1e-9
+            p[20] = 2  # 1x1 only
         elif self.matrix_type is MatrixType.SYMMETRIC_POSITIVE_DEFINITE:
             # mtype=2 uses Cholesky without pivoting: perturbation, scaling,
             # matching and Bunch-Kaufman all do not apply and must be zero.
@@ -284,7 +283,38 @@ class PardisoWrapper:
         self._call(Phase.SOLVE)
         return self.x
 
-    def release(self):
+    def solve_multi(self, B: np.ndarray) -> np.ndarray:
+        """
+        Solve K X = B for multiple RHS columns simultaneously.
+        B: shape (N, k), Fortran-contiguous for PARDISO's column-major layout.
+        Returns X: shape (N, k).
+        """
+        if B.ndim != 2 or B.shape[0] != self.A.shape[0]:
+            raise ValueError(
+                "B must be 2D and the number of rows must match A. "
+                f"B shape: {B.shape}, versus A shape: {self.A.shape}"
+            )
+
+        B = np.asfortranarray(B, dtype=np.float64)
+        X = np.zeros_like(B, order="F")
+
+        nrhs_original = self._nrhs
+        b_original = self.b
+        x_original = self.x
+
+        try:
+            self._nrhs = _I(B.shape[1])
+            self.b = B
+            self.x = X
+            self.solve()
+        finally:
+            # Move original values back
+            self._nrhs = nrhs_original
+            self.b = b_original
+            self.x = x_original
+        return X
+
+    def free_memory(self):
         if not self._released and self._analyzed:
             self._call(Phase.RELEASE_ALL)
         self._released = True
@@ -313,12 +343,12 @@ class PardisoWrapper:
 
     @property
     def peak_memory_kb(self) -> int:
-        """max of iparm(15) and iparm(16) + iparm(17)."""
+        """Max of iparm(15) and iparm(16) + iparm(17)."""
         return max(int(self.iparm[14]), int(self.iparm[15]) + int(self.iparm[16]))
 
     @property
     def inertia(self) -> tuple[int, int]:
-        """iparm(22), iparm(23). Reported for symmetric INDEFINITE matrices only."""
+        """iparm(22), iparm(23). Reported for symmetric indefinite matrices only."""
         if self.matrix_type is not MatrixType.SYMMETRIC_INDEFINITE:
             raise AttributeError(
                 "inertia is only reported for symmetric indefinite matrices"
