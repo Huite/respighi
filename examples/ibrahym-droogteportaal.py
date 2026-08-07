@@ -138,7 +138,7 @@ target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=sigma)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization=rsp.UnscaledMinimumCurvature(100.0),
+    regularization=rsp.UnscaledMinimumCurvature(1000.0),
     maxiter=30,
     maxdh=0.001,
 )

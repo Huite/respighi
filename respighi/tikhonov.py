@@ -83,54 +83,59 @@ class UnscaledMinimumCurvature(NamedTuple):
 
 
 class MinimumCurvature(NamedTuple):
-    """
-    Parameters
-    ----------
-    curvature_scale : float
-        A characteristic curvature scale for the field, in units of
-        recharge / length^2 (e.g. (m/d)/m^2 = m^-1 d^-1). Roughly:
-        "how much does recharge bend over one length unit, relative
-        to its own rate of change" -- smaller values penalize
-        curvature more strongly (stiffer, smoother fields).
-    length_scale: float
-    """
+    roughness_scale: float
 
-    curvature_scale: float
-    length_scale: float
-
-    def build_tikhonov_operator(self, ny: int, nx: int, dx: float) -> sparse.csr_matrix:
+    def build_tikhonov_operator(
+        self,
+        ny: int,
+        nx: int,
+        dx: float,
+    ) -> sparse.csr_matrix:
         L = graph_laplacian(ny, nx)
-        return L / (self.curvature_scale * self.length_scale * dx)
+        return L / (self.roughness_scale * dx)
 
     @classmethod
     def from_sinusoid(
         cls,
-        standard_deviation: float,
-        effective_range: float,
+        amplitude: float,
+        half_wavelength: float,
     ) -> "MinimumCurvature":
         """
-        Estimate a curvature_scale based on sinusoidal recharge pattern.
+        Scale minimum-curvature regularization using a conceptual
+        sinusoidal recharge field.
 
-        Assumes a field r(x) = A sin(2 pi x / lambda) with amplitude
-        A = standard_deviation * sqrt(2) and wavelength
-        lambda = 2 * effective_range (i.e. effective_range is the
-        crest-to-trough distance). Its peak curvature_scale,
+        The reference field is
 
-            reference_curvature = (pi / effective_range)^2 * A
+            r(x) = A sin(pi x / R)
 
-        is used as the curvature scale.
+        where A is the peak recharge anomaly and R is the
+        half-wavelength.
 
         Parameters
         ----------
-        standard_deviation : float
-            Typical recharge variation, same units as recharge (e.g. m/d).
-        effective_range : float
-            Distance over which that variation occurs, in model length
-            units (e.g. m).
+        amplitude : float
+            Peak recharge anomaly in m/d. The reference field varies
+            between -amplitude and +amplitude around its mean.
+
+        half_wavelength : float
+            Distance in model length units between a positive peak and
+            the next negative peak. The full sinusoidal wavelength is
+            twice this value.
+
+        Notes
+        -----
+        The maximum curvature of the reference field is
+
+            (pi / R)**2 * A,
+
+        and the resulting minimum-curvature roughness scale is
+
+            pi**2 * A / R,
+
+        and its standard devation is
+
+            sqrt(2) * A
+
+        or approximately 0.7 * A.
         """
-        return cls(
-            curvature_scale=(np.pi / effective_range) ** 2
-            * standard_deviation
-            * np.sqrt(2),
-            length_scale=effective_range,
-        )
+        return cls(roughness_scale=(np.pi**2 * amplitude / half_wavelength))

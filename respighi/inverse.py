@@ -127,8 +127,8 @@ class InverseProblem:
         Optimality conditions:
         ∂L/∂h = P^T μ_e + A^T λ = 0        → P^T (w_obs e) + A^T λ = 0
         ∂L/∂r = L^T μ_s - Q^T λ = 0        → L^T (w_reg s) - Q^T λ = 0
-        ∂L/∂e = w_obs e - μ_e = 0          (used to eliminate μ_e)
-        ∂L/∂s = w_reg s - μ_s = 0          (used to eliminate μ_s)
+        ∂L/∂e = e - μ_e = 0          (used to eliminate μ_e)
+        ∂L/∂s = s - μ_s = 0          (used to eliminate μ_s)
 
         Constraints:
         - A h - Q r = b_bc
