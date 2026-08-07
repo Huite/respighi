@@ -8,6 +8,7 @@ from scipy import sparse
 
 from respighi.groundwaterflow import GroundwaterModel
 from respighi.linearsolvers.direct import make_direct_solver
+from respighi.linearsolvers.solvertypes import MatrixType
 from respighi.target import FittingTarget
 
 
@@ -55,6 +56,15 @@ class InverseProblem:
         Convergence tolerance for non-linear head updates (default: 1e-4)
     relax : float, optional
         Relaxation factor for Picard iteration (default: 0.0)
+    solver_backend: str, optional: "pardiso", "mumps", "scipy".
+        Which linear solver to use.
+    explicit_residuals: bool, optional
+        Represent observation and regularization residuals as explicit unknowns.
+        This avoids forming ``P.T @ P`` and ``L.T @ L`` and can preserve sparsity when
+        observations represent averages or coarse-model values.
+    symmetric: bool, optional
+        Whether to store only the upper triangle or materialize both halves for a general solver.
+        the system is symmetric, but the general treatment may be more robust in some cases.
     """
 
     def __init__(
@@ -66,11 +76,15 @@ class InverseProblem:
         maxdh=1e-4,
         relax=0.0,
         solver_backend: Literal["pardiso", "mumps", "scipy"] | None = None,
+        explicit_residuals: bool = False,
+        symmetric: bool = True,
     ):
         # On macOS: Default to MUMPS instead of Intel Pardiso
         if solver_backend is None:
             solver_backend = "mumps" if platform.system() == "Darwin" else "pardiso"
         self.solver_backend = solver_backend
+        self.explicit_residuals = explicit_residuals
+        self.symmetric = symmetric
 
         # Store core attributes
         self.gwf = groundwatermodel
@@ -89,14 +103,23 @@ class InverseProblem:
         self._head_iter = np.zeros(self.n)
         self._head_update = np.zeros(self.n)
         self.linearsolver = None
+        self.Pt = None
+
         # Extract diagonal indices for efficient Picard updates
-        self.At_diag_indices, self.A_diag_indices = self._extract_diagonal_indices()
-        self.K.data[self.At_diag_indices] = self.gwf.hcof
-        self.K.data[self.A_diag_indices] = self.gwf.hcof
-        self.rhs_flow_slice = slice(self.n + self.layer_n, 2 * self.n + self.layer_n)
-        self.rhs_obs_slice = slice(
-            2 * self.n + self.layer_n, 2 * self.n + self.layer_n + len(target.d)
-        )
+        self._A_diag_indices = self._extract_diagonal_indices()
+        self.K.data[self._A_diag_indices] = self.gwf.hcof
+
+        if explicit_residuals:
+            obs_start = self.n + self.layer_n
+            n_obs_rhs = len(self.target.d)
+            flow_start = obs_start + n_obs_rhs + self.layer_n
+        else:
+            obs_start = 0
+            n_obs_rhs = self.n
+            flow_start = self.n + self.layer_n
+
+        self.rhs_obs_slice = slice(obs_start, obs_start + n_obs_rhs)
+        self.rhs_flow_slice = slice(flow_start, flow_start + self.n)
 
     def _build_matrix(self, regularization) -> sparse.csr_matrix:
         """Build optimality system matrix.
@@ -111,19 +134,15 @@ class InverseProblem:
         - A h - Q r = b_bc
         - P h - e = d
         - L r - s = 0
-
-        Block structure: [h, r, e, s, λ]^T
         """
         # Mark diagonals with sentinel for later extraction
         A = self.gwf.A.copy()
         A.setdiag(np.inf)
-        At = A.T
 
         P = self.target.P
         if P.shape[1] < self.n:
             padding = sparse.csr_matrix((P.shape[0], self.n - P.shape[1]))
             P = sparse.hstack([P, padding])
-        Pt = P.T
 
         # NOTE:
         # Assumes constant cell sizes, and dx == dy.
@@ -131,30 +150,49 @@ class InverseProblem:
         L = regularization.build_tikhonov_operator(
             ny=ny, nx=nx, dx=np.sqrt(self.gwf.area)
         )
-        Lt = L.T
 
         rows = np.arange(self.layer_n)
         area = np.full(self.layer_n, self.gwf.area)
         Q = sparse.coo_matrix(
             (area, (rows, rows)), shape=(self.n, self.layer_n)
         ).tocsr()
-        Qt = Q.T
 
-        n_obs = P.shape[0]
-        I_e = sparse.eye(n_obs, format="csr")
-        I_s = sparse.eye(self.layer_n, format="csr")
+        Z_n = sparse.csr_array((self.n, self.n))
+        if self.explicit_residuals:
+            n_obs = P.shape[0]
+            Z_layer = sparse.csr_array((self.layer_n, self.layer_n))
+            I_e = sparse.eye_array(n_obs, format="csr")
+            I_s = sparse.eye_array(self.layer_n, format="csr")
+            blocks = [
+                # Zero diagonal blocks are needed: without them block_array
+                # cannot infer the h and r block-column widths.
+                [Z_n, None, P.T, None, A.T],
+                [None, Z_layer, None, L.T, -Q.T],
+                [None, None, -I_e, None, None],
+                [None, None, None, -I_s, None],
+                [None, None, None, None, Z_n],
+            ]
+        else:
+            blocks = [
+                [P.T @ P, None, A.T],
+                [None, L.T @ L, -Q.T],
+                [None, None, Z_n],
+            ]
+            self.Pt = P.T
 
-        return sparse.block_array(
-            [
-                # h,     r,      e,      s,      λ
-                [None, None, Pt, None, At],
-                [None, None, None, Lt, -Qt],
-                [A, -Q, None, None, None],
-                [P, None, -I_e, None, None],
-                [None, L, None, -I_s, None],
-            ],
-            format="csr",
-        )
+        Kupper = sparse.triu(sparse.block_array(blocks))
+        if self.symmetric:
+            # Symmetric solvers need an explicitly stored diagonal,
+            # including structurally zero diagonal entries.
+            K = Kupper
+            K.setdiag(Kupper.diagonal())
+        else:
+            # Reconstruct the complete symmetric matrix without
+            # duplicating the diagonal.
+            K = Kupper + sparse.triu(Kupper, k=1).T
+
+        K = K.tocsr()
+        return K
 
     def _build_rhs_vector(self) -> np.ndarray:
         """
@@ -164,17 +202,27 @@ class InverseProblem:
         flow RHS (boundary conditions), the observation vector, and the
         regularization RHS.
         """
-        return np.concatenate(
-            [
-                np.zeros(self.n),  # h
-                np.zeros(self.layer_n),  # r
-                self.gwf.rhs,  # flow equation
-                self.target.d,  # observations
-                np.zeros(self.layer_n),  # s
-            ]
-        )
+        if self.explicit_residuals:
+            rhs = np.concatenate(
+                [
+                    np.zeros(self.n),  # stationarity h
+                    np.zeros(self.layer_n),  # stationarity r
+                    self.target.d,  # observation constraint
+                    np.zeros(self.layer_n),  # regularization constraint
+                    self.gwf.rhs,  # flow constraint
+                ]
+            )
+        else:
+            rhs = np.concatenate(
+                [
+                    self.Pt @ self.target.d,  # h equation
+                    np.zeros(self.layer_n),  # r equation
+                    self.gwf.rhs,  # flow constraint
+                ]
+            )
+        return rhs
 
-    def _extract_diagonal_indices(self) -> tuple[np.ndarray, np.ndarray]:
+    def _extract_diagonal_indices(self) -> np.ndarray:
         """
         Extract the CSR data indices of the A^T and A diagonals for efficient
         Picard updates.
@@ -193,8 +241,13 @@ class InverseProblem:
         a_indices: np.ndarray
             CSR data indices of the A diagonal entries.
         """
-        inf_indices = np.where(np.isinf(self.K.data))[0]
-        return inf_indices[: self.n], inf_indices[self.n :]
+        indices = np.flatnonzero(np.isinf(self.K.data))
+        if indices.size not in (self.n, 2 * self.n):
+            raise RuntimeError(
+                f"Expected {self.n} or {2 * self.n} groundwater diagonal "
+                f"sentinels, found {indices.size}."
+            )
+        return indices.reshape(-1, self.n)
 
     def _formulate_gwf(self, dt):
         """
@@ -206,8 +259,7 @@ class InverseProblem:
         """
         np.copyto(self.gwf._head, self._head)
         self.gwf.formulate(recharge=False, dt=dt)
-        self.K.data[self.At_diag_indices] = self.gwf.hcof
-        self.K.data[self.A_diag_indices] = self.gwf.hcof
+        self.K.data[self._A_diag_indices] = self.gwf.hcof
         self.rhs[self.rhs_flow_slice] = self.gwf.rhs
         return
 
@@ -217,8 +269,14 @@ class InverseProblem:
         and numerical factorization (phase 22).
         """
         self._formulate_gwf(dt=dt)
+
+        if self.symmetric:
+            matrix_type = MatrixType.SYMMETRIC_INDEFINITE
+        else:
+            matrix_type = MatrixType.NONSYMMETRIC
+
         self.linearsolver = make_direct_solver(
-            self.solver_backend, self.K, self.rhs, self.x
+            self.solver_backend, self.K, self.rhs, self.x, matrix_type=matrix_type
         )
         # Analysis is the most costly phase.
         self.linearsolver.analyze()
@@ -248,7 +306,10 @@ class InverseProblem:
         """
         if d.shape != self.target.d.shape:
             raise ValueError("Observation size changed: rebuild instead.")
-        self.rhs[self.rhs_obs_slice] = d
+        if self.explicit_residuals:
+            self.rhs[self.rhs_obs_slice] = d
+        else:
+            self.rhs[self.rhs_obs_slice] = self.Pt @ d
 
     def linear_solve(self):
         """Solve the linear system for ``[h, r, λ]^T``."""
@@ -359,7 +420,7 @@ class InverseProblem:
     @property
     def _lagrangian(self):
         """Current Lagrange multipliers; the final ``layer_n`` entries of the solution vector."""
-        return self.x[-self.layer_n :]
+        return self.x[-self.n :]
 
     @property
     def head(self):
