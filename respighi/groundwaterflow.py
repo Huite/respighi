@@ -85,25 +85,23 @@ class HeadBoundary:
 def _smoothstep_inplace(x, width, work):
     """
     Transform x in place from a signed distance to a threshold
-    (e.g. head - elevation) into a smoothed activation weight in [0, 1].
+    (e.g. head - elevation) into a smoothed activation weight in [0, 1]
+    via a C1-continuous piecewise quadratic.
 
-    Uses the cubic Hermite smoothstep s(t) = 3t^2 - 2t^3, t = clip(x/width, 0, 1),
-    which is C1-continuous.
-
-    x and work are preallocated arrays of the same shape and x is overwritten as a result.
+    x and work are preallocated arrays of the same shape; both are overwritten.
     """
-    inv_width = 1.0 / width
-    np.multiply(x, inv_width, out=x)
+    np.add(x, 0.5 * width, out=x)
+    np.multiply(x, 1.0 / width, out=x)
     np.clip(x, 0.0, 1.0, out=x)
-    np.multiply(x, x, out=work)  # work = t**2
-    np.multiply(x, -2.0, out=x)
-    np.add(x, 3.0, out=x)  # x = 3 - 2t
-    np.multiply(x, work, out=x)  # x = t**2 * (3 - 2t)
+    np.subtract(1.0, x, out=work)  # 1 - t
+    np.multiply(work, x, out=work)  # t * (1 - t)
+    np.multiply(work, 0.5 * width, out=work)
 
 
 class Drainage:
     """
     Drainage boundary condition.
+
     Smoothly activates as head rises above the drain elevation, transitioning
     from inactive to a head boundary at the drain elevation over an interval
     `smoothing_width`, instead of switching discontinuously like the classical
@@ -128,13 +126,15 @@ class Drainage:
         self.smoothing_width = smoothing_width
 
     def formulate(self, hcof, rhs, head):
-        # weight = 0 well below elevation, 1 well above, smooth in between
         np.subtract(head, self.elevation, out=self._weight)
         _smoothstep_inplace(self._weight, self.smoothing_width, self._rhs)
-        # hcof += conductance * weight
+        # rhs -= conductance * offset, while _rhs still holds the offset
+        np.multiply(self._rhs, self.conductance, out=self._rhs)
+        np.subtract(rhs, self._rhs, out=rhs)
+        # hcof += conductance * t
         np.multiply(self.conductance, self._weight, out=self._rhs)
         np.add(hcof, self._rhs, out=hcof)
-        # rhs += conductance * elevation * weight
+        # rhs += conductance * elevation * t
         np.multiply(self._celev, self._weight, out=self._rhs)
         np.add(rhs, self._rhs, out=rhs)
         return
@@ -162,6 +162,7 @@ class Drainage:
 class River:
     """
     River boundary condition.
+
     Smoothly blends between fixed-rate flux (head at/below bottom_elevation)
     and linear head-dependent flux (head above bottom_elevation), transitioning
     over an interval `smoothing_width` instead of switching discontinuously like
@@ -192,13 +193,12 @@ class River:
         self.smoothing_width = smoothing_width
 
     def formulate(self, hcof, rhs, head):
-        # weight = 0 well below bottom_elevation (fixed), 1 well above (linear)
         np.subtract(head, self.bottom_elevation, out=self._weight)
         _smoothstep_inplace(self._weight, self.smoothing_width, self._rhs)
-        # hcof += conductance * weight
+        np.multiply(self._rhs, self.conductance, out=self._rhs)
+        np.subtract(rhs, self._rhs, out=rhs)
         np.multiply(self.conductance, self._weight, out=self._rhs)
         np.add(hcof, self._rhs, out=hcof)
-        # rhs += fixed_rhs + weight * conductance * bottom_elevation
         np.add(rhs, self._fixed_rhs, out=rhs)
         np.multiply(self._cbot, self._weight, out=self._rhs)
         np.add(rhs, self._rhs, out=rhs)
@@ -338,6 +338,8 @@ class GroundwaterModel:
             Non-linear convergence criterion.
         maxiter: int = 30,
             Maximum number of non-linear iterations.
+        relax: float = 1.0
+            Relaxation factor (0-1]. A value of one indicates no relaxation.
         """
         transmissivity_3d = atleast_3d_front(transmissivity)
         initial_3d = atleast_3d_front(initial)
@@ -617,21 +619,23 @@ class GroundwaterModel:
         iterations: int
             Number of iterations taken.
         """
+        maxdh = np.inf
         for i in range(self.maxiter):
             np.copyto(self._head_iter, self._head)
             self.formulate(dt=dt)
             converged_linear, _ = self.linear_solve(warn=False)
             np.subtract(self._head, self._head_iter, out=self._update)
-            maxdx = np.linalg.norm(self._update, ord=np.inf)
-            print(maxdx)
-            if maxdx < self.xclose:
+            maxdh = np.linalg.norm(self._update, ord=np.inf)
+            print(maxdh)
+            if maxdh < self.xclose:
                 return True, i + 1
             if self.relax != 0.0:
-                self._head -= self.relax * self._update
+                self._update *= self.relax
+                np.add(self._head_iter, self._update, out=self._head)
 
         warnings.warn(
             f"Nonlinear solver did not converge after {self.maxiter} iterations. "
-            f"Final update: {maxdx:.2e}"
+            f"Final update: {maxdh:.2e}"
         )
         return False, self.maxiter
 

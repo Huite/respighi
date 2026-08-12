@@ -55,7 +55,7 @@ class InverseProblem:
     maxdh : float, optional
         Convergence tolerance for non-linear head updates (default: 1e-4)
     relax : float, optional
-        Relaxation factor for Picard iteration (default: 0.0)
+        Relaxation factor (0-1]. A value of one indicates no relaxation.
     solver_backend: str, optional: "pardiso", "mumps", "scipy".
         Which linear solver to use.
     explicit_residuals: bool, optional
@@ -74,7 +74,7 @@ class InverseProblem:
         regularization: float,
         maxiter: int = 30,
         maxdh=1e-4,
-        relax=0.0,
+        relax=1.0,
         solver_backend: Literal["pardiso", "mumps", "scipy"] | None = None,
         explicit_residuals: bool = False,
         symmetric: bool = True,
@@ -367,6 +367,7 @@ class InverseProblem:
         if self.linearsolver is None:
             raise RuntimeError("Must call formulate() before solve")
 
+        maxdh = np.inf
         for i in range(self.maxiter):
             np.copyto(dst=self._x_old, src=self.x)
             np.copyto(dst=self._head_iter, src=self._head)
@@ -377,7 +378,9 @@ class InverseProblem:
             print(maxdh)
             if maxdh < self.maxdh:
                 return True, i + 1
-            self.x -= self.relax * self._x_update
+            if self.relax != 1.0:
+                self._x_update *= self.relax
+                np.add(self._x_old, self._x_update, out=self.x)
             self.reformulate()
 
         warnings.warn(
