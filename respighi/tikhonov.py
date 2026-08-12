@@ -60,7 +60,7 @@ class MaternSemivariogram(NamedTuple):
         ax.axvline(
             self.effective_range, linestyle="dashed", color="black", label="range"
         )
-        ax.set_ylabel("Semivariance")
+        ax.set_ylabel("Variance")
         ax.set_xlabel("Distance")
         ax.legend()
         return ax
