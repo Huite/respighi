@@ -1,3 +1,14 @@
+"""
+IBRAHYM interpolation
+=====================
+
+The following example shows a test case:
+
+* Synthetic "piezometer data" sampled from IBRAHYM output.
+* Boundary conditions taken from IBRAHYM.
+
+We interpolate a mean head for the window.
+"""
 # %%
 
 import geopandas as gpd

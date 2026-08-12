@@ -35,7 +35,7 @@ transmissivity = xr.open_dataarray("testdata/transmissivity.nc").astype(np.float
 # groundwater model, formulate, then solve.
 
 
-WIDTH = 1e-9
+WIDTH = 1e-2
 river = rsp.River.from_dataset(riverds, smoothing_width=WIDTH)
 ditch = rsp.Drainage.from_dataset(ditchds, smoothing_width=WIDTH)
 tube = rsp.Drainage.from_dataset(tubeds, smoothing_width=WIDTH)
@@ -115,7 +115,6 @@ inverse = rsp.InverseProblem(
     target=target,
     regularization=rsp.UnscaledMinimumCurvature(100.0),
     maxiter=30,
-    relax=0.1,
 )
 
 # %%
@@ -161,23 +160,3 @@ inverse.lagrangian.plot(ax=ax)
 ax.set_aspect(1.0)
 
 # %%
-
-inverse.linearsolver.memory_usage()
-
-# %%
-
-
-np.sqrt(np.prod(inverse.head.shape))
-
-# %%
-linearsolver = rsp.linearsolvers.direct.make_direct_solver(
-    "pardiso",
-    gwf.A,
-    gwf.rhs,
-    gwf._head,
-)
-linearsolver.analyze()
-linearsolver.factorize()
-
-# %%
-linearsolver.memory_usage()

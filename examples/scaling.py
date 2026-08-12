@@ -124,7 +124,7 @@ inverse = rsp.InverseProblem(
     target=target,
     regularization=rsp.UnscaledMinimumCurvature(1.0),
     maxiter=100,
-    relax=0.0,
+    explicit_residuals=True,
 )
 
 # %%
@@ -193,7 +193,7 @@ inverse = rsp.InverseProblem(
     target=target,
     regularization=rsp.UnscaledMinimumCurvature(1.0),
     maxiter=100,
-    relax=0.0,
+    explicit_residuals=True,
 )
 inverse.formulate()
 inverse.nonlinear_solve()
