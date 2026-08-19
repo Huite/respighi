@@ -110,13 +110,13 @@ class InverseProblem:
         self.K.data[self._A_diag_indices] = self.gwf.hcof
 
         if explicit_residuals:
-            obs_start = self.n + self.layer_n + 1
+            obs_start = self.n + self.layer_n
             n_obs_rhs = len(self.target.d)
             flow_start = obs_start + n_obs_rhs + self.layer_n
         else:
             obs_start = 0
             n_obs_rhs = self.n
-            flow_start = self.n + self.layer_n + 1
+            flow_start = self.n + self.layer_n
 
         self.rhs_obs_slice = slice(obs_start, obs_start + n_obs_rhs)
         self.rhs_flow_slice = slice(flow_start, flow_start + self.n)
@@ -151,48 +151,32 @@ class InverseProblem:
             ny=ny, nx=nx, dx=np.sqrt(self.gwf.area)
         )
 
-        # Recharge mapper
         rows = np.arange(self.layer_n)
         area = np.full(self.layer_n, self.gwf.area)
         Q = sparse.coo_matrix(
             (area, (rows, rows)), shape=(self.n, self.layer_n)
         ).tocsr()
 
-        # Mean recharge term
-        mean_weights = np.full(
-            self.layer_n,
-            1.0 / self.layer_n,
-        )
-        c = sparse.csr_array(mean_weights[:, None])
-        q = Q @ np.ones(self.layer_n)
-
         Z_n = sparse.csr_array((self.n, self.n))
-        Z_1 = sparse.csr_array((1, 1))
         if self.explicit_residuals:
             n_obs = P.shape[0]
             Z_layer = sparse.csr_array((self.layer_n, self.layer_n))
             I_e = sparse.eye_array(n_obs, format="csr")
             I_s = sparse.eye_array(self.layer_n, format="csr")
-            # Zero diagonal blocks are needed: without them block_array
-            # cannot infer the h and r block-column widths.
             blocks = [
-                #           h        r        m      e       s       lambda   eta
-                [Z_n, None, None, P.T, None, A.T, None],
-                [None, Z_layer, None, None, L.T, -Q.T, c],
-                [None, None, Z_1, None, None, -q.T, None],
-                [None, None, None, -I_e, None, None, None],
-                [None, None, None, None, -I_s, None, None],
-                [None, None, None, None, None, Z_n, None],
-                [None, None, None, None, None, None, Z_1],
+                # Zero diagonal blocks are needed: without them block_array
+                # cannot infer the h and r block-column widths.
+                [Z_n, None, P.T, None, A.T],
+                [None, Z_layer, None, L.T, -Q.T],
+                [None, None, -I_e, None, None],
+                [None, None, None, -I_s, None],
+                [None, None, None, None, Z_n],
             ]
         else:
             blocks = [
-                #             h          r        m      lambda   eta
-                [P.T @ P, None, None, A.T, None],
-                [None, L.T @ L, None, -Q.T, c],
-                [None, None, Z_1, -q.T, None],
-                [None, None, None, Z_n, None],
-                [None, None, None, None, Z_1],
+                [P.T @ P, None, A.T],
+                [None, L.T @ L, -Q.T],
+                [None, None, Z_n],
             ]
             self.Pt = P.T
 
@@ -222,12 +206,10 @@ class InverseProblem:
             rhs = np.concatenate(
                 [
                     np.zeros(self.n),  # stationarity h
-                    np.zeros(self.layer_n),  # stationarity recharge anomaly
-                    np.zeros(1),  # stationarity mean recharge
+                    np.zeros(self.layer_n),  # stationarity r
                     self.target.d,  # observation constraint
                     np.zeros(self.layer_n),  # regularization constraint
-                    self.gwf.rhs,  # groundwater flow constraint
-                    np.zeros(1),  # zero-mean anomaly constraint
+                    self.gwf.rhs,  # flow constraint
                 ]
             )
         else:
@@ -235,9 +217,7 @@ class InverseProblem:
                 [
                     self.Pt @ self.target.d,  # h equation
                     np.zeros(self.layer_n),  # r equation
-                    np.zeros(1),
                     self.gwf.rhs,  # flow constraint
-                    np.zeros(1),
                 ]
             )
         return rhs
@@ -432,29 +412,18 @@ class InverseProblem:
 
     @property
     def _head(self):
+        """Current head estimate; the first ``n`` entries of the solution vector."""
         return self.x[: self.n]
 
     @property
-    def _recharge_anomaly(self):
+    def _recharge(self):
+        """Current recharge estimate; entries ``n`` to ``n + layer_n`` of the solution vector."""
         return self.x[self.n : self.n + self.layer_n]
 
     @property
-    def _mean_recharge(self):
-        return self.x[self.n + self.layer_n]
-
-    @property
-    def _recharge(self):
-        anomaly = self.x[self.n : self.n + self.layer_n]
-        mean = self.x[self.n + self.layer_n]
-        return anomaly + mean
-
-    @property
     def _lagrangian(self):
-        return self.x[-self.n - 1 : -1]
-
-    @property
-    def _mean_lagrangian(self):
-        return self.x[-1]
+        """Current Lagrange multipliers; the final ``layer_n`` entries of the solution vector."""
+        return self.x[-self.n :]
 
     @property
     def head(self):
