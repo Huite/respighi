@@ -7,7 +7,7 @@ import xarray as xr
 from scipy import sparse
 
 from respighi.groundwaterflow import GroundwaterModel
-from respighi.linearsolvers.direct import make_direct_solver
+from respighi.linearsolvers.direct import MumpsWrapper, make_direct_solver
 from respighi.linearsolvers.solvertypes import MatrixType
 from respighi.target import FittingTarget
 
@@ -95,7 +95,7 @@ class InverseProblem:
         self.maxiter = maxiter
         self.maxdh = maxdh
         self.relax = relax
-        self.K = self._build_matrix(regularization)
+        self.K, self.Pt, self.matrix_type = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
         self.x = np.zeros_like(self.rhs)
         self._x_old = np.zeros_like(self.rhs)
@@ -103,7 +103,6 @@ class InverseProblem:
         self._head_iter = np.zeros(self.n)
         self._head_update = np.zeros(self.n)
         self.linearsolver = None
-        self.Pt = None
 
         # Extract diagonal indices for efficient Picard updates
         self._A_diag_indices = self._extract_diagonal_indices()
@@ -140,6 +139,7 @@ class InverseProblem:
         A.setdiag(np.inf)
 
         P = self.target.P
+        Pt = P.T
         if P.shape[1] < self.n:
             padding = sparse.csr_matrix((P.shape[0], self.n - P.shape[1]))
             P = sparse.hstack([P, padding])
@@ -166,7 +166,7 @@ class InverseProblem:
             blocks = [
                 # Zero diagonal blocks are needed: without them block_array
                 # cannot infer the h and r block-column widths.
-                [Z_n, None, P.T, None, A.T],
+                [Z_n, None, Pt, None, A.T],
                 [None, Z_layer, None, L.T, -Q.T],
                 [None, None, -I_e, None, None],
                 [None, None, None, -I_s, None],
@@ -174,11 +174,10 @@ class InverseProblem:
             ]
         else:
             blocks = [
-                [P.T @ P, None, A.T],
+                [Pt @ P, None, A.T],
                 [None, L.T @ L, -Q.T],
                 [None, None, Z_n],
             ]
-            self.Pt = P.T
 
         Kupper = sparse.triu(sparse.block_array(blocks))
         if self.symmetric:
@@ -186,13 +185,15 @@ class InverseProblem:
             # including structurally zero diagonal entries.
             K = Kupper
             K.setdiag(Kupper.diagonal())
+            matrix_type = MatrixType.SYMMETRIC_INDEFINITE
         else:
             # Reconstruct the complete symmetric matrix without
             # duplicating the diagonal.
             K = Kupper + sparse.triu(Kupper, k=1).T
+            matrix_type = MatrixType.NONSYMMETRIC
 
         K = K.tocsr()
-        return K
+        return K, Pt, matrix_type
 
     def _build_rhs_vector(self) -> np.ndarray:
         """
@@ -269,14 +270,8 @@ class InverseProblem:
         and numerical factorization (phase 22).
         """
         self._formulate_gwf(dt=dt)
-
-        if self.symmetric:
-            matrix_type = MatrixType.SYMMETRIC_INDEFINITE
-        else:
-            matrix_type = MatrixType.NONSYMMETRIC
-
         self.linearsolver = make_direct_solver(
-            self.solver_backend, self.K, self.rhs, self.x, matrix_type=matrix_type
+            self.solver_backend, self.K, self.rhs, self.x, matrix_type=self.matrix_type
         )
         # Analysis is the most costly phase.
         self.linearsolver.analyze()
@@ -455,42 +450,102 @@ class InverseProblem:
             name="lagrangian",
         )
 
-    def observation_influence_functions(
-        self,
-        batch_size: int | None = None,
-    ):
-        """
-        Estimate head variance contribution from observation uncertainty.
+    def observation_mapping_matrix(self) -> np.ndarray:
+        r"""
+        Compute the local linear mapping from observations to reconstructed heads.
 
-        For each observation i, computes the influence function
+        For the non-explicit residual formulation,
 
-            phi_i = d h / d d_i
+        .. math::
 
-        by solving the already-factorized system with a unit perturbation in
-        the observation RHS row. The variance contribution is
+            K
+            \begin{bmatrix}
+                h \\ r \\ \lambda
+            \end{bmatrix}
+            =
+            \begin{bmatrix}
+                P^T d \\ 0 \\ b_{\mathrm{bc}}
+            \end{bmatrix}.
 
-            v_h = sum_i sigma_i^2 * phi_i^2
+        Holding the KKT matrix fixed at the current, typically converged, Picard
+        state gives
 
+        .. math::
+
+            \delta h = W \, \delta d.
+
+        Column ``i`` of ``W`` is therefore the reconstructed head response to a
+        unit perturbation of observation ``i``.
+
+        Returns
+        -------
+        W : np.ndarray of shape (n_head, n_obs)
+            Local linear mapping from observation perturbations to head
+            perturbations.
         """
         if self.linearsolver is None:
-            raise RuntimeError("Must call formulate() before influence estimation")
+            raise RuntimeError(
+                "Must call formulate() before computing the observation mapping"
+            )
 
-        n_obs = len(self.target.d)
+        if self.explicit_residuals:
+            raise RuntimeError(
+                "observation_mapping_matrix() assumes the non-explicit "
+                "residual formulation"
+            )
+
+        n_obs = self.Pt.shape[1]
         N = len(self.rhs)
-        obs_rows = np.arange(self.rhs_obs_slice.start, self.rhs_obs_slice.stop)
-        if batch_size is None:
-            batch_size = n_obs
+        B = np.zeros((N, n_obs), dtype=float)
+        # The observation-dependent part of the KKT RHS is P.T @ d.
+        B[: self.n, :] = self.Pt.toarray()
+        X = self.linearsolver.solve_multi(B)
+        # The first block of the KKT solution is h.
+        return X[: self.n, :]
 
-        Phi = np.zeros((self.n, n_obs))
-        for start in range(0, n_obs, batch_size):
-            stop = min(start + batch_size, n_obs)
-            m = stop - start
-            B = np.zeros((N, m))
-            B[obs_rows[start:stop], np.arange(m)] = 1.0
-            X = self.linearsolver.solve_multi(B)
-            Phi[:, start:stop] = X[: self.n, :]
+    def observation_surrogate(self) -> xr.Dataset:
+        r"""
+        Build the local linear observation-to-head surrogate.
 
-        return Phi
+        The surrogate is linearized around the current head estimate and
+        observation vector:
+
+        .. math::
+
+            h(d) \approx h_{ref} + W (d - d_{ref}).
+
+        Returns
+        -------
+        xr.Dataset
+            Dataset containing:
+
+            - ``head_reference``: reference head field, with dimensions
+                ``(layer, y, x)``.
+            - ``observation_reference``: reference observation values, with
+                dimension ``(observation,)``.
+            - ``W``: observation-to-head mapping, with dimensions
+                ``(layer, y, x, observation)``.
+        """
+        W = self.observation_mapping_matrix()
+        n_obs = len(self.target.d)
+        head_shape = self.gwf.transmissivity.shape
+        return xr.Dataset(
+            data_vars={
+                "head_reference": self.head,
+                "observation_reference": (
+                    "observation",
+                    np.asarray(self.target.d).copy(),
+                ),
+                "weights": (
+                    ("layer", "y", "x", "observation"),
+                    W.reshape(*head_shape, n_obs),
+                ),
+            },
+            coords={
+                **self.gwf._coords,
+                "observation": np.arange(n_obs),
+            },
+        )
 
     def boundary_influence_functions(self):
         """
@@ -515,67 +570,20 @@ class InverseProblem:
         X = self.linearsolver.solve_multi(B)
         return X[: self.n, :]
 
-    def estimate_variance(self, batch_size: int | None = None):
-        r"""
-        Estimate head variance from observation and boundary uncertainty.
+    def estimate_variance(self):
+        # Only mumps supports inverted entries properly.
+        if not isinstance(self.linearsolver, MumpsWrapper):
+            linearsolver = make_direct_solver(
+                "mumps", self.K, self.rhs, self.x, matrix_type=self.matrix_type
+            )
+            linearsolver.analyze()
+            linearsolver.factorize()
+        else:
+            linearsolver = self.linearsolver
 
-        Combines two sources of uncertainty via first-order linear error
-        propagation through the factorized system:
-
-        - Observation uncertainty: each piezometer contributes a variance
-        proportional to ``target.sigma[i]**2``, weighted by its influence
-        function ``phi_i = dh / dd_i``.
-        - Boundary uncertainty: each head boundary contributes a variance
-        from a spatially coherent shift, weighted by the conductance and
-        ``boundary.sigma`` fields, expressed as ``psi_k = dh / d delta_k``.
-
-        The total variance is:
-
-        .. math::
-
-            \text{Var}(\\mathbf{h}) =
-            \sum_i \sigma_i^2 \, \\boldsymbol{\phi}_i^2
-            + \sum_k \boldsymbol{\psi}_k^2
-
-        where :math:`\sigma_i` is already absorbed into :math:`\boldsymbol{\psi}_k`
-        via the conductance-sigma weighting in
-        :meth:`boundary_influence_functions`.
-
-        Observation and boundary errors are assumed mutually independent, so
-        their variance contributions add. All influence functions are computed
-        via multi-RHS solves reusing the existing PARDISO or MUMPS factorization; no
-        additional factorization is required.
-
-        .. note::
-
-            This is a first-order estimate, linearized around the converged
-            head solution. It captures uncertainty due to observation noise
-            and boundary condition uncertainty, but not structural model error
-            (e.g. transmissivity uncertainty, incorrect boundary placement).
-            The spatial pattern is therefore more reliable than the absolute
-            magnitudes, which depend on the physical calibration of
-            ``target.sigma`` and ``boundary.sigma``.
-
-        Parameters
-        ----------
-        batch_size : int, optional
-            Number of observation influence functions to solve simultaneously.
-            If None, all observations are solved in a single multi-RHS call.
-            Reduce this if memory is a concern for large observation sets.
-
-        Returns
-        -------
-        variance : xr.DataArray of shape (layer, y, x)
-            Pointwise head variance in units of head squared (m²), with the
-            same grid coordinates as the groundwater model.
-        """
-        sigma_obs = self.target.sigma
-        Phi_obs = self.observation_influence_functions(batch_size=batch_size)
-        Phi_bc = self.boundary_influence_functions()
-        var = np.sum((Phi_obs * sigma_obs) ** 2, axis=1)
-        var += np.sum(Phi_bc**2, axis=1)
+        variance = linearsolver.inverse_diagonal(indices=np.arange(self.n))
         return xr.DataArray(
-            data=var.reshape(self.gwf.transmissivity.shape),
+            data=variance.reshape(self.gwf.transmissivity.shape),
             dims=("layer", "y", "x"),
             coords=self.gwf._coords,
             name="variance",
