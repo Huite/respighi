@@ -3,9 +3,9 @@
 Phases are separated: analyze (11) / factorize (22) / solve (33) / release (-1).
 A, b and x are borrowed by reference and must be mutated in place by the caller.
 
-iparm indices below are 0-BASED numpy indices. The MKL docs number them
-1-based, so iparm[10] here is iparm(11) in the documentation. Every value is
-set explicitly (iparm[0] = 1), so pardisoinit is never called and mtype cannot
+iparm is exposed through the Iparm class below, which is 1-BASED to match the
+MKL documentation: self.iparm[11] here is iparm(11) in the docs. Every value is
+set explicitly (iparm[1] = 1), so pardisoinit is never called and mtype cannot
 silently rewrite the array.
 
 Mostly derived from the pypardiso wrapper.
@@ -39,7 +39,7 @@ class Phase:
     RELEASE_ALL = -1
 
 
-# Verify against your MKL version's docs before trusting these.
+# TODO: verify against current MKL version docs.
 _ERRORS = {
     -1: "input inconsistent",
     -2: "not enough memory",
@@ -65,6 +65,71 @@ class PardisoError(RuntimeError):
             f"PARDISO phase {phase} failed with error {code}: "
             f"{_ERRORS.get(code, 'unknown error')}"
         )
+
+
+class Iparm:
+    """1-based view of the PARDISO iparm array.
+
+    Indices match the MKL documentation: iparm[11] here is iparm(11) in the
+    docs. Index 0, negative indices and slices are rejected rather than
+    silently aliased onto the wrong entry.
+
+    Wraps the array MKL writes into, so output entries such as iparm(14) and
+    iparm(18) read back through the same object after a call.
+    """
+
+    # 1-based. Might change across MKL versions: entries get un-reserved as
+    # features are added, and a stale entry here is a false rejection.
+    _RESERVED = frozenset(
+        {3, 26, 29, 32, 33, 38, 40, 41, 42, 61, 62, 64}
+        | set(range(44, 56))
+        | set(range(57, 60))
+    )
+
+    __slots__ = ("_a",)
+
+    def __init__(self):
+        self._a = np.zeros(64, dtype=np.int32)
+
+    @staticmethod
+    def _ix(i) -> int:
+        if not isinstance(i, (int, np.integer)):
+            raise TypeError(
+                f"iparm index must be a single int in 1..64, got {type(i).__name__}"
+            )
+        if not 1 <= i <= 64:
+            raise IndexError(f"iparm index {i} out of range, valid indices are 1..64")
+        return int(i) - 1
+
+    def __getitem__(self, i) -> int:
+        return int(self._a[self._ix(i)])
+
+    def __setitem__(self, i, value) -> None:
+        j = self._ix(i)
+        if value != 0 and (j + 1) in self._RESERVED:
+            raise ValueError(
+                f"iparm({j + 1}) is reserved and must stay 0; writing {value} "
+                "there is silently ignored by MKL. Check the index against the "
+                "iparm table"
+            )
+        self._a[j] = value
+
+    def __len__(self) -> int:
+        return 64
+
+    def __repr__(self) -> str:
+        nz = ", ".join(f"iparm({j + 1})={v}" for j, v in enumerate(self._a) if v != 0)
+        return f"<Iparm {nz or 'all zero'}>"
+
+    @property
+    def raw(self) -> np.ndarray:
+        """The underlying 0-based int32 array. For the ctypes call only."""
+        return self._a
+
+    @property
+    def ptr(self):
+        """Pointer to the underlying buffer, for the pardiso() argument list."""
+        return self._a.ctypes.data_as(_IP)
 
 
 def _load_mkl() -> ctypes.CDLL:
@@ -139,7 +204,7 @@ class PardisoWrapper(DirectSolver):
             64, dtype=np.int64 if self._pt_ctype is ctypes.c_int64 else np.int32
         )
         self._perm = np.zeros(A.shape[0], dtype=np.int32)
-        self.iparm = np.zeros(64, dtype=np.int32)
+        self.iparm = Iparm()  # 1-based, see the class docstring
 
         # Persistent scalars: mutate .value rather than rebuilding per call, so
         # mtype and n cannot drift between phases sharing the same pt handle.
@@ -153,8 +218,7 @@ class PardisoWrapper(DirectSolver):
         self._error = _I(0)
 
         self._set_iparm(check_matrix=check_matrix)
-
-        # Zero-based indexing (iparm[34] = 1) lets the scipy arrays be passed
+        # Zero-based indexing (iparm(35) = 1) lets the scipy arrays be passed
         # straight through with no +1 copy. Hold the references: these arrays
         # must outlive every call that uses their pointers.
         self._ia = np.ascontiguousarray(A.indptr, dtype=np.int32)
@@ -195,45 +259,46 @@ class PardisoWrapper(DirectSolver):
                 raise ValueError(f"{name} must be Fortran-ordered for multiple RHS")
 
     def _set_iparm(self, check_matrix: bool):
+        # Indices below are 1-based and match the MKL documentation directly.
         p = self.iparm
-        p[0] = 1  # iparm(1)  do not fill defaults; every entry below is ours
-        p[1] = 2  # iparm(2)  METIS nested dissection (3 = threaded METIS)
-        p[3] = 0  # iparm(4)  no preconditioned CGS
-        p[4] = 0  # iparm(5)  no user permutation
-        p[5] = 0  # iparm(6)  write solution to x, leave b intact
-        p[7] = 2  # iparm(8)  max iterative refinement steps
-        p[8] = 0  # iparm(9)  backward error computed but not a stopping test
-        p[9] = 13  # iparm(10) pivot perturbation 1e-13
+        p[1] = 1  # do not fill defaults; every entry below is ours
+        p[2] = 2  # METIS nested dissection (3 = threaded METIS)
+        p[4] = 0  # no preconditioned CGS
+        p[5] = 0  # no user permutation
+        p[6] = 0  # write solution to x, leave b intact
+        p[8] = 2  # max iterative refinement steps
+        p[9] = 0  # backward error computed but not a stopping test
+        p[10] = 13  # pivot perturbation 1e-13
         # Scaling and matching both require the numerical values of A to be
         # present at ANALYSIS time (phase 11), not just at factorization.
-        p[10] = 1  # iparm(11) scaling
-        p[11] = 0  # iparm(12) no transpose solve
-        p[12] = 1  # iparm(13) matching
-        p[17] = -1  # iparm(18) report nnz in factors
-        p[18] = 0  # iparm(19) skip Mflop count (increases reordering time)
-        p[20] = 1  # iparm(21) Bunch-Kaufman 1x1/2x2 pivoting; mtype -2/-4/6 only
-        p[23] = 0  # iparm(24) classic factorization. The two-level algorithm (1)
-        # is silently ignored unless scaling and matching are BOTH
+        p[11] = 1  # scaling
+        p[12] = 0  # no transpose solve
+        p[13] = 1  # matching
+        p[18] = -1  # report nnz in factors
+        p[19] = 0  # skip Mflop count (increases reordering time)
+        p[21] = 1  # Bunch-Kaufman 1x1/2x2 pivoting; mtype -2/-4/6 only
+        p[24] = 0  # classic factorization. The two-level algorithm (1) is
+        # silently ignored unless scaling and matching are BOTH
         # off, so it is only reachable in the SPD branch below.
-        p[24] = 0  # iparm(25) parallel forward/backward solve
-        p[26] = int(check_matrix)  # iparm(27) matrix checker, debug only
-        p[27] = 0  # iparm(28) float64
-        p[34] = 1  # iparm(35) zero-based ia, ja and perm
-        p[36] = 0  # iparm(37) CSR (>0 would be BSR with that block size)
-        p[55] = 0  # iparm(56) no pivot callback / pardiso_getdiag
-        p[59] = 0  # iparm(60) in-core
+        p[25] = 0  # parallel forward/backward solve
+        p[27] = int(check_matrix)  # matrix checker, debug only
+        p[28] = 0  # float64
+        p[35] = 1  # zero-based ia, ja and perm
+        p[37] = 0  # CSR (>0 would be BSR with that block size)
+        p[56] = 0  # no pivot callback / pardiso_getdiag
+        p[60] = 0  # in-core
 
         if self.matrix_type is MatrixType.SYMMETRIC_INDEFINITE:
-            p[9] = 9  # symmetric indefinite perturbation, 1e-9
-            p[20] = 2  # 1x1 only
+            p[10] = 9  # symmetric indefinite perturbation, 1e-9
+            p[21] = 2  # 1x1 only
         elif self.matrix_type is MatrixType.SYMMETRIC_POSITIVE_DEFINITE:
             # mtype=2 uses Cholesky without pivoting: perturbation, scaling,
             # matching and Bunch-Kaufman all do not apply and must be zero.
-            p[9] = 0
             p[10] = 0
-            p[12] = 0
-            p[20] = 0
-            p[23] = 1  # reachable here: scaling and matching are off
+            p[11] = 0
+            p[13] = 0
+            p[21] = 0
+            p[24] = 1  # reachable here: scaling and matching are off
 
     def _call(self, phase: int):
         if self._released:
@@ -252,7 +317,7 @@ class PardisoWrapper(DirectSolver):
             self._ja.ctypes.data_as(_IP),
             self._perm.ctypes.data_as(_IP),
             ctypes.byref(self._nrhs),
-            self.iparm.ctypes.data_as(_IP),
+            self.iparm.ptr,
             ctypes.byref(self._msglvl),
             self.b.ctypes.data_as(_DP),
             self.x.ctypes.data_as(_DP),
@@ -323,46 +388,38 @@ class PardisoWrapper(DirectSolver):
         return self
 
     def __exit__(self, *exc):
-        self.release()
+        self.free_memory()
         return False
 
     @property
     def perturbed_pivots(self) -> int:
-        """iparm(14). Not reported for mtype=2, which does not perturb pivots.
+        """iparm(14). Not relevant for mtype=2, which does not perturb pivots.
 
         Climbing over iterations means the factorization is degrading.
         """
-        if self.matrix_type is MatrixType.SYMMETRIC_POSITIVE_DEFINITE:
-            raise AttributeError("mtype=2 does not perturb pivots")
-        return int(self.iparm[13])
+        return self.iparm[14]
 
     @property
     def factor_nnz(self) -> int:
         """iparm(18). Fill-in produced by the ordering."""
-        return int(self.iparm[17])
+        return self.iparm[18]
 
     @property
     def peak_memory_kb(self) -> int:
         """Max of iparm(15) and iparm(16) + iparm(17)."""
-        return max(int(self.iparm[14]), int(self.iparm[15]) + int(self.iparm[16]))
+        return max(self.iparm[15], self.iparm[16] + self.iparm[17])
 
     @property
     def inertia(self) -> tuple[int, int]:
-        """iparm(22), iparm(23). Reported for symmetric indefinite matrices only."""
-        if self.matrix_type is not MatrixType.SYMMETRIC_INDEFINITE:
-            raise AttributeError(
-                "inertia is only reported for symmetric indefinite matrices"
-            )
-        return int(self.iparm[21]), int(self.iparm[22])
+        """iparm(22), iparm(23). Relevant for symmetric indefinite matrices only."""
+        return self.iparm[22], self.iparm[23]
 
     @property
     def first_bad_pivot(self) -> int:
-        """iparm(30). Only populated for mtype=2 (and complex mtype=4).
+        """iparm(30). Only relevant for mtype=2 (and complex mtype=4).
 
         The EQUATION NUMBER at which a zero or negative pivot was found, not a
         count. Factorization stops there and returns error -4, so read this in
         the PardisoError handler rather than after a successful factorize().
         """
-        if self.matrix_type is not MatrixType.SYMMETRIC_POSITIVE_DEFINITE:
-            raise AttributeError("iparm(30) is only populated for mtype=2")
-        return int(self.iparm[29])
+        return self.iparm[30]
