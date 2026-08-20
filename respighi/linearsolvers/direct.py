@@ -91,6 +91,38 @@ class MumpsWrapper(DirectSolver):
         self.mumps.solve(b=X, overwrite_b=True)
         return X
 
+    @staticmethod
+    def inverse_entries(mumps, pattern):
+        """pattern: N x N sparse matrix; nonzero (i,j) requests A^{-1}[i,j]."""
+        # See: https://gitlab.kwant-project.org/kwant/python-mumps/-/work_items/33
+        from mumps import _mumps
+
+        if not mumps.factored:
+            raise RuntimeError("Run .factorize() first")
+
+        b = sparse.csc_array(pattern)
+        col_ptr = np.asfortranarray(b.indptr.astype(_mumps.int_dtype)) + 1
+        row_ind = np.asfortranarray(b.indices.astype(_mumps.int_dtype)) + 1
+        out = np.zeros(b.nnz, dtype=mumps.data.dtype, order="F")
+
+        mumps.mumps_instance.set_sparse_rhs(col_ptr, row_ind, out)
+        mumps.mumps_instance.icntl[20] = 1
+        mumps.mumps_instance.icntl[30] = 1
+        mumps.mumps_instance.job = 3
+        try:
+            mumps.call()
+        finally:
+            mumps.mumps_instance.icntl[30] = 0  # or every later solve breaks
+        return out  # values in CSC order of `pattern`
+
+    def inverse_diagonal(self, indices: np.ndarray):
+        n = len(indices)
+        N = self.A.shape[0]
+        pattern = sparse.coo_array(
+            (np.ones(n), (indices, indices)), shape=(N, N)
+        ).tocsc()
+        return self.inverse_entries(self.mumps, pattern)
+
 
 def make_direct_solver(solver_backend: str, A, b, x, matrix_type=None):
     match solver_backend:
