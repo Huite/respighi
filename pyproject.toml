@@ -65,6 +65,7 @@ rioxarray = "*"
 sqlalchemy = ">=2.0.49,<3"
 psycopg2 = ">=2.9.11,<3"
 python-mumps = ">=0.0.6,<0.0.7"
+zarr = ">=3.3.0,<4"
 
 [tool.pixi.tasks]
 docs = "sphinx-build docs docs/_build"
