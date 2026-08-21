@@ -1,14 +1,18 @@
 import platform
+import tempfile
 import warnings
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import xarray as xr
 from scipy import sparse
 
+from respighi.constants import BoolArray
 from respighi.groundwaterflow import GroundwaterModel
 from respighi.linearsolvers.direct import MumpsWrapper, make_direct_solver
 from respighi.linearsolvers.solvertypes import MatrixType
+from respighi.output import zarr_writer
 from respighi.target import FittingTarget
 
 
@@ -264,7 +268,7 @@ class InverseProblem:
         self.rhs[self.rhs_flow_slice] = self.gwf.rhs
         return
 
-    def formulate(self, dt=0.0):
+    def formulate(self, dt=None):
         """
         Formulate the system of equations, call PARDISO's analysis (phase 11)
         and numerical factorization (phase 22).
@@ -277,7 +281,7 @@ class InverseProblem:
         self.linearsolver.analyze()
         self.linearsolver.factorize()
 
-    def reformulate(self, dt=0.0):
+    def reformulate(self, dt=None):
         """
         Formulate the system of equations, call PARDISO's numerical
         factorization; unlike ``.formulate``, this does not call the expensive
@@ -287,25 +291,6 @@ class InverseProblem:
         self._formulate_gwf(dt=dt)
         self.linearsolver.factorize()
 
-    def update_observations(self, d):
-        """
-        Replace the observation vector in the RHS.
-
-        Useful for transient runs where observations change between time steps
-        without requiring a full rebuild of the system.
-
-        Parameters
-        ----------
-        d:
-            New observation vector. Must have the same shape as the original.
-        """
-        if d.shape != self.target.d.shape:
-            raise ValueError("Observation size changed: rebuild instead.")
-        if self.explicit_residuals:
-            self.rhs[self.rhs_obs_slice] = d
-        else:
-            self.rhs[self.rhs_obs_slice] = self.Pt @ d
-
     def linear_solve(self):
         """Solve the linear system for ``[h, r, λ]^T``."""
         if self.linearsolver is None:
@@ -313,7 +298,7 @@ class InverseProblem:
         self.linearsolver.solve()
         return
 
-    def nonlinear_solve(self):
+    def nonlinear_solve(self, dt=None):
         """
         Solve the nonlinear system for ``[h, r, λ]^T`` using Picard iteration.
 
@@ -344,6 +329,7 @@ class InverseProblem:
 
         maxdh = np.inf
         for i in range(self.maxiter):
+            self.reformulate(dt=dt)
             np.copyto(dst=self._x_old, src=self.x)
             np.copyto(dst=self._head_iter, src=self._head)
             self.linear_solve()
@@ -351,12 +337,11 @@ class InverseProblem:
             np.subtract(self.x, self._x_old, out=self._x_update)
             maxdh = np.linalg.norm(self._head_update, ord=np.inf)
             print(maxdh)
-            if maxdh < self.maxdh:
+            if (i > 0) and (maxdh < self.maxdh):
                 return True, i + 1
             if self.relax != 1.0:
                 self._x_update *= self.relax
                 np.add(self._x_old, self._x_update, out=self.x)
-            self.reformulate()
 
         warnings.warn(
             f"Nonlinear solver did not converge after {self.maxiter} iterations. "
@@ -364,46 +349,69 @@ class InverseProblem:
         )
         return False, self.maxiter
 
-    def run(self, dts, targets, callback=None):
+    def advance(self, time_index: int):
+        self.gwf.advance(time_index)
+        self.target.advance(time_index)
+        # Now copy over the observations from the target to the rhs.
+        if self.explicit_residuals:
+            self.rhs[self.rhs_obs_slice] = self.target.d
+        else:
+            self.rhs[self.rhs_obs_slice] = self.Pt @ self.target.d
+
+    def run(
+        self,
+        time,
+        path=None,
+        steady_state: bool | BoolArray = True,
+    ) -> xr.Dataset:
         """
         Run a transient or batched inverse solve over a sequence of time steps.
 
-        Performs the expensive PARDISO analysis once, then iterates over time
+        Re-uses the analysis phase of the linear solver, and iterates over time
         steps, updating observations and refactorizing at each step.
-
-        The optional ``callback`` is invoked before each step, allowing,
-        boundary conditions, or other model state to be updated in-place.
 
         Parameters
         ----------
-        dts:
-            Sequence of time step sizes.
-        targets:
-            Sequence of FittingTarget objects, one per time step.
-        callback:
-            Optional callable with signature ``callback(problem, i, dt)``,
-            where ``problem`` is the ``InverseProblem`` instance, ``i`` is
-            the zero-based step index, and ``dt`` is the current time step
-            size. Called at the start of each step, before refactorization.
+        time:
+        path:
+        steady_state: bool or array of bools
 
         Returns
         -------
-        list of np.ndarray
-            Flat head arrays (length ``n``) after each time step.
+        xarray.Dataset
         """
+        tmp = None
+        if path is None:
+            tmp = tempfile.TemporaryDirectory(prefix="respighi-")
+            path = Path(tmp.name) / "inverse-results.zarr"
+
+        nlayer, ny, nx = self.gwf.transmissivity.shape
+        dts = time.diff().days[1:]
+        steady = np.broadcast_to(steady_state, len(dts))
+        self.gwf.bind_time(time)
+        self.target.bind_time(time)
         np.copyto(dst=self._head, src=self.gwf.initial)
-        self.formulate()
-        out = []
-        for i, (dt, target) in enumerate(zip(dts, targets)):
-            if callback is not None:
-                callback(self, i, dt)
-            self.update_observations(target.d)
-            # Copy head to gwf._head_old for storage term formulation.
-            np.copyto(dst=self.gwf._head_old, src=self._head)
-            self.reformulate(dt=dt)
-            self.nonlinear_solve()
-            out.append(self._head.copy())
-        return out
+        self.formulate(dt=None)
+
+        with zarr_writer(
+            path=path, time=time[:-1], dims=("layer", "y", "x"), coords=self.gwf._coords
+        ) as group:
+            zarr_head = group["head"]
+            zarr_recharge = group["recharge"]
+            zarr_converged = group["converged"]
+            zarr_iterations = group["iterations"]
+            for i, dt in enumerate(dts):
+                self.advance(i)
+                zarr_converged[i], zarr_iterations[i] = self.nonlinear_solve(
+                    dt=None if steady[i] else dt
+                )
+                zarr_head[i] = self._head.reshape((nlayer, ny, nx))
+                zarr_recharge[i] = self._recharge.reshape((ny, nx))
+
+        ds = xr.open_zarr(path)
+        if tmp is not None:
+            ds.set_close(tmp.cleanup)
+        return ds
 
     @property
     def _head(self):

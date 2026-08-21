@@ -1,4 +1,7 @@
+import abc
+import tempfile
 import warnings
+from pathlib import Path
 from typing import Sequence
 
 import geopandas as gpd
@@ -8,9 +11,10 @@ import xarray as xr
 import xugrid as xu
 from scipy import sparse
 
-from respighi.constants import FloatArray, IntArray
+from respighi.constants import BoolArray, FloatArray, IntArray
 from respighi.linearsolvers.cg import PCGSolver
 from respighi.linearsolvers.ilu0 import ILU0Preconditioner
+from respighi.output import zarr_writer
 
 
 def constant_helper(dataset, template_var, constant, name):
@@ -21,7 +25,23 @@ def constant_helper(dataset, template_var, constant, name):
         return dataset.get(name)
 
 
-class Recharge:
+class Boundary(abc.ABC):
+    @abc.abstractmethod
+    def formulate(self):
+        pass
+
+    @abc.abstractmethod
+    def from_dataset(self):
+        pass
+
+    def advance(self, time_index: int):
+        pass
+
+    def bind_time(self, time):
+        pass
+
+
+class Recharge(Boundary):
     """
     Spatially distributed recharge boundary condition.
 
@@ -47,7 +67,7 @@ class Recharge:
         )
 
 
-class HeadBoundary:
+class HeadBoundary(Boundary):
     """
     Fixed-head  boundary condition.
 
@@ -98,7 +118,7 @@ def _smoothstep_inplace(x, width, work):
     np.multiply(work, 0.5 * width, out=work)
 
 
-class Drainage:
+class Drainage(Boundary):
     """
     Drainage boundary condition.
 
@@ -159,7 +179,7 @@ class Drainage:
         )
 
 
-class River:
+class River(Boundary):
     """
     River boundary condition.
 
@@ -350,7 +370,7 @@ class GroundwaterModel:
         if isinstance(transmissivity, xr.DataArray):
             coords = dict(transmissivity.coords)
             if "layer" not in coords:
-                coords["layer"] = [0]  # TODO(?): 0 or 1-based indexing
+                coords["layer"] = np.array([0])  # TODO(?): 0 or 1-based indexing
             self._coords = coords
         else:
             dx = np.sqrt(area)
@@ -520,13 +540,13 @@ class GroundwaterModel:
             shape=(size, size),
         ).tocsr()
 
-    def formulate(self, recharge=True, dt=0.0):
+    def formulate(self, recharge=True, dt=None):
         """
         Assemble the RHS vector and diagonal (hcof) for the current iteration.
 
         Resets RHS and diagonal to their base values, then accumulates
-        contributions from storage (if ``dt > 0``), recharge, and all head
-        boundaries. A ``dt`` of 0.0 encodes steady-state behaviour — no storage
+        contributions from storage (if ``dt is not None``), recharge, and all head
+        boundaries. A ``dt`` of None encodes steady-state behaviour: no storage
         term is added.
 
         Parameters
@@ -534,15 +554,14 @@ class GroundwaterModel:
         recharge:
             Whether to include the recharge boundary condition.
         dt:
-            Time step size. Set to 0.0 for steady state.
+            Time step size. Set to None for steady state.
         """
         # Reset
         self.rhs[:] = 0.0
         self.hcof[:] = self.D[:]
 
         # Formulate storage
-        # dt = 0.0 encodes steady state behavior, i.e. no storage.
-        if dt > 0.0:
+        if dt is not None:
             inv_dt = self.area / dt
             np.multiply(self.storativity, inv_dt, out=self._storage_work)
             self.hcof += self._storage_work
@@ -599,7 +618,7 @@ class GroundwaterModel:
             )
         return converged, iterations
 
-    def nonlinear_solve(self, dt=0.0):
+    def nonlinear_solve(self, dt=None):
         """
         Solve the nonlinear system using Picard iteration.
 
@@ -627,7 +646,7 @@ class GroundwaterModel:
             np.subtract(self._head, self._head_iter, out=self._update)
             maxdh = np.linalg.norm(self._update, ord=np.inf)
             print(maxdh)
-            if maxdh < self.xclose:
+            if (i > 0) and (maxdh < self.xclose):
                 return True, i + 1
             if self.relax != 0.0:
                 self._update *= self.relax
@@ -639,7 +658,25 @@ class GroundwaterModel:
         )
         return False, self.maxiter
 
-    def run(self, dts, callback=None):
+    def bind_time(self, time) -> None:
+        self.recharge.bind_time(time)
+        for boundary in self.head_boundaries:
+            boundary.bind_time(time)
+        return
+
+    def advance(self, time_index: int) -> None:
+        np.copyto(dst=self._head_old, src=self._head)
+        self.recharge.advance(time_index)
+        for boundary in self.head_boundaries:
+            boundary.advance(time_index)
+        return
+
+    def run(
+        self,
+        time,
+        path=None,
+        steady_state: bool | BoolArray = True,
+    ) -> xr.Dataset:
         """
         Run a transient or batched simulation over a sequence of time steps.
 
@@ -659,16 +696,34 @@ class GroundwaterModel:
             the zero-based step index, and ``dt`` is the current time step
             size. Called at the start of each step, before formulation.
         """
+        tmp = None
+        if path is None:
+            tmp = tempfile.TemporaryDirectory(prefix="respighi-")
+            path = Path(tmp.name) / "gwf-results.zarr"
 
+        nlayer, ny, nx = self.gwf.transmissivity.shape
+        dts = time.diff().days[1:]
+        np.broadcast_to(steady_state, len(dts))
+        self.gwf.bind_time(time)
         np.copyto(dst=self._head, src=self.initial)
-        out = []
-        for i, dt in enumerate(dts):
-            if callback is not None:
-                callback(self, i, dt)
-            np.copyto(dst=self._head_old, src=self._head)
-            converged, iters = self.nonlinear_solve(dt=dt)
-            out.append(self._head.copy())
-        return out
+        self.formulate(dt=None)
+
+        with zarr_writer(
+            path=path, time=time, dims=("layer", "y", "x"), coords=self._coords
+        ) as group:
+            zarr_head = group["head"]
+            zarr_converged = group["converged"]
+            zarr_iters = group["iterations"]
+            for i, dt in enumerate(dts):
+                self.advance(i)
+                np.copyto(dst=self._head_old, src=self._head)
+                zarr_converged[i], zarr_iters[i] = self.nonlinear_solve(dt=dt)
+                zarr_head[i] = self._head.reshape((nlayer, ny, nx))
+
+        ds = xr.open_zarr(path)
+        if tmp is not None:
+            ds.set_close(tmp.cleanup)
+        return ds
 
     @property
     def head(self) -> xr.DataArray:

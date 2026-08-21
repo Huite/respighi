@@ -19,7 +19,6 @@ from respighi.target import (
     CellSampling,
     CompositeTarget,
     GridSampling,
-    InterpolatedSampling,
     ModelTarget,
 )
 from respighi.tikhonov import (
@@ -38,7 +37,6 @@ __all__ = (
     "LinearInterpolationSurrogate",
     "GridSampling",
     "CellSampling",
-    "InterpolatedSampling",
     "ModelTarget",
     "CompositeTarget",
     "MaternSemivariogram",
