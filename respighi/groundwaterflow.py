@@ -427,6 +427,7 @@ class GroundwaterModel:
         self._head_iter = np.empty_like(self._head)
         self._storage_work = np.empty_like(self.storativity)
         self._update = np.empty_like(self._head)
+        self._residual = np.empty_like(self._head)
 
         # Matrix assembly
         self.W = self._build_conductance(
