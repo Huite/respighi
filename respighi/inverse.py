@@ -106,6 +106,7 @@ class InverseProblem:
         self._x_update = np.zeros_like(self.rhs)
         self._head_iter = np.zeros(self.n)
         self._head_update = np.zeros(self.n)
+        self._flow_residual = np.empty(self.n)
         self.linearsolver = None
 
         # Extract diagonal indices for efficient Picard updates
@@ -298,6 +299,16 @@ class InverseProblem:
         self.linearsolver.solve()
         return
 
+    @property
+    def flow_residual(self) -> np.ndarray:
+        """Residual of ``A h - Q r = b_bc``, including the recharge coupling."""
+        self._flow_residual[:] = 0.0
+        np.multiply(
+            self.gwf.area, self._recharge, out=self._flow_residual[: self.layer_n]
+        )
+        self._flow_residual += self.gwf.residual
+        return self._flow_residual
+
     def nonlinear_solve(self, dt=None):
         """
         Solve the nonlinear system for ``[h, r, λ]^T`` using Picard iteration.
@@ -450,11 +461,11 @@ class InverseProblem:
 
     @property
     def lagrangian(self):
-        """Lagrange multipliers as a labelled DataArray of shape ``(y, x)``."""
+        """Lagrange multipliers as a labelled DataArray of shape ``(layer, y, x)``."""
         return xr.DataArray(
-            self._lagrangian.reshape(self.gwf.transmissivity.shape[1:]),
-            dims=("y", "x"),
-            coords={"y": self.gwf._coords["y"], "x": self.gwf._coords["x"]},
+            self._lagrangian.reshape(self.gwf.transmissivity.shape),
+            dims=("layer", "y", "x"),
+            coords=self.gwf._coords,
             name="lagrangian",
         )
 

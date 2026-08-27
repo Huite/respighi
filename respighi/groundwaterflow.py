@@ -10,6 +10,7 @@ import pypardiso
 import xarray as xr
 import xugrid as xu
 from scipy import sparse
+from scipy.sparse._sparsetools import csr_matvec
 
 from respighi.constants import BoolArray, FloatArray, IntArray
 from respighi.linearsolvers.cg import PCGSolver
@@ -321,7 +322,7 @@ class GroundwaterModel:
         maxiter_linear: int = 100,
         xclose: float = 1e-4,
         maxiter: int = 30,
-        relax: float = 0.0,
+        relax: float = 1.0,
     ):
         """
         Confined groundwater flow model.
@@ -648,7 +649,7 @@ class GroundwaterModel:
             print(maxdh)
             if (i > 0) and (maxdh < self.xclose):
                 return True, i + 1
-            if self.relax != 0.0:
+            if self.relax != 1.0:
                 self._update *= self.relax
                 np.add(self._head_iter, self._update, out=self._head)
 
@@ -701,10 +702,10 @@ class GroundwaterModel:
             tmp = tempfile.TemporaryDirectory(prefix="respighi-")
             path = Path(tmp.name) / "gwf-results.zarr"
 
-        nlayer, ny, nx = self.gwf.transmissivity.shape
+        nlayer, ny, nx = self.transmissivity.shape
         dts = time.diff().days[1:]
         np.broadcast_to(steady_state, len(dts))
-        self.gwf.bind_time(time)
+        self.bind_time(time)
         np.copyto(dst=self._head, src=self.initial)
         self.formulate(dt=None)
 
@@ -738,3 +739,20 @@ class GroundwaterModel:
         return xr.DataArray(
             head_3d, dims=("layer", "y", "x"), coords=self._coords, name="head"
         )
+
+    @property
+    def residual(self) -> np.ndarray:
+        """
+        Residual ``b - A @ h`` for the current head and formulation.
+
+        Computed in-place into a work array: the returned array is
+        invalidated by the next access.
+        """
+        A = self.A
+        A.setdiag(self.hcof)
+        # csr_matvec accumulates (y += A @ x), so negate around it rather
+        # than allocating a temporary for A @ x.
+        np.negative(self.rhs, out=self._residual)
+        csr_matvec(*A.shape, A.indptr, A.indices, A.data, self._head, self._residual)
+        np.negative(self._residual, out=self._residual)
+        return self._residual
