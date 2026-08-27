@@ -421,13 +421,14 @@ class GroundwaterModel:
         self.area = area
         self.n = n
         self.rhs = np.zeros(n)
-        self._head = self.initial.copy()
+        self._head = self.initial.astype(float, copy=True)
         # Work arrays
-        self._head_old = self._head.copy()
-        self._head_iter = np.empty_like(self._head)
-        self._storage_work = np.empty_like(self.storativity)
-        self._update = np.empty_like(self._head)
-        self._residual = np.empty_like(self._head)
+        self._head_old = self._head.astype(float, copy=True)
+        self._head_iter = np.empty_like(self._head, dtype=float)
+        self._storage_work = np.empty_like(self.storativity, dtype=float)
+        self._update = np.empty_like(self._head, dtype=float)
+        self._residual = np.empty_like(self._head, dtype=float)
+        self._rclose = np.empty_like(self._head, dtype=float)
 
         # Matrix assembly
         self.W = self._build_conductance(
@@ -631,7 +632,7 @@ class GroundwaterModel:
         Parameters
         ----------
         dt:
-            Time step size. Set to 0.0 for steady state.
+            Time step size. Set to None for steady state.
 
         Returns
         -------
@@ -640,23 +641,41 @@ class GroundwaterModel:
         iterations: int
             Number of iterations taken.
         """
+        # Initial formulation defines the fixed residual scaling.
+        self.formulate(dt=dt)
+        np.abs(self.hcof, out=self._rclose)
+        self._rclose *= self.xclose
+
         maxdh = np.inf
+        maxr = np.inf
         for i in range(self.maxiter):
-            np.copyto(self._head_iter, self._head)
-            self.formulate(dt=dt)
+            np.copyto(dst=self._head_iter, src=self._head)
             converged_linear, _ = self.linear_solve(warn=False)
             np.subtract(self._head, self._head_iter, out=self._update)
             maxdh = np.linalg.norm(self._update, ord=np.inf)
-            print(maxdh)
-            if (i > 0) and (maxdh < self.xclose):
-                return True, i + 1
+
             if self.relax != 1.0:
                 self._update *= self.relax
                 np.add(self._head_iter, self._update, out=self._head)
 
+            # Evaluate at current head
+            self.formulate(dt=dt)
+
+            # Normalize residuals in-place:
+            residual = self.residual
+            np.abs(residual, out=residual)
+            np.divide(residual, self._rclose, out=residual)
+            maxr = residual.max()
+
+            # Check nonlinear convergence
+            print(maxdh, maxr)
+            if (maxdh < self.xclose) and (maxr < 1.0):
+                return True, i + 1
+
         warnings.warn(
             f"Nonlinear solver did not converge after {self.maxiter} iterations. "
-            f"Final update: {maxdh:.2e}"
+            f"Final update: {maxdh:.2e}; "
+            f"maximum normalized residual: {maxr:.2e}"
         )
         return False, self.maxiter
 

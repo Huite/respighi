@@ -101,12 +101,12 @@ class InverseProblem:
         self.relax = relax
         self.K, self.Pt, self.matrix_type = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
-        self.x = np.zeros_like(self.rhs)
-        self._x_old = np.zeros_like(self.rhs)
-        self._x_update = np.zeros_like(self.rhs)
-        self._head_iter = np.zeros(self.n)
-        self._head_update = np.zeros(self.n)
-        self._flow_residual = np.empty(self.n)
+        self.x = np.zeros_like(self.rhs, dtype=float)
+        self._x_old = np.zeros_like(self.rhs, dtype=float)
+        self._x_update = np.zeros_like(self.rhs, dtype=float)
+        self._head_iter = np.zeros(self.n, dtype=float)
+        self._head_update = np.zeros(self.n, dtype=float)
+        self._flow_residual = np.empty(self.n, dtype=float)
         self.linearsolver = None
 
         # Extract diagonal indices for efficient Picard updates
@@ -338,25 +338,50 @@ class InverseProblem:
         if self.linearsolver is None:
             raise RuntimeError("Must call formulate() before solve")
 
+        # Initial formulation defines the fixed residual scaling.
+        self.reformulate(dt=dt)
+        rclose = self.gwf._rclose
+        np.abs(self.gwf.hcof, out=rclose)
+        rclose *= self.maxdh
+
         maxdh = np.inf
+        maxr = np.inf
         for i in range(self.maxiter):
-            self.reformulate(dt=dt)
             np.copyto(dst=self._x_old, src=self.x)
             np.copyto(dst=self._head_iter, src=self._head)
             self.linear_solve()
             np.subtract(self._head, self._head_iter, out=self._head_update)
             np.subtract(self.x, self._x_old, out=self._x_update)
             maxdh = np.linalg.norm(self._head_update, ord=np.inf)
-            print(maxdh)
-            if (i > 0) and (maxdh < self.maxdh):
-                return True, i + 1
+
+            np.abs(self._head_update, out=self._head_update)
+            i_max = np.argmax(self._head_update)
+            ijk_max = np.unravel_index(i_max, shape=self.gwf.transmissivity.shape)
+
             if self.relax != 1.0:
                 self._x_update *= self.relax
                 np.add(self._x_old, self._x_update, out=self.x)
 
+            # Evaluate at current head
+            self.reformulate(dt=dt)
+
+            # Normalize residuals in-place:
+            residual = self.flow_residual
+            np.abs(residual, out=residual)
+            np.divide(residual, rclose, out=residual)
+            maxr = residual.max()
+
+            # Check nonlinear convergence
+            print("maxdh: ", maxdh, "maxr: ", maxr)
+            print("i,j,k: ", tuple(int(v) for v in ijk_max))
+            print("head at dhmax: ", float(self._head[i_max]))
+            if (maxdh < self.maxdh) and (maxr < 1.0):
+                return True, i + 1
+
         warnings.warn(
             f"Nonlinear solver did not converge after {self.maxiter} iterations. "
-            f"Final update: {maxdh:.2e}"
+            f"Final update: {maxdh:.2e}; "
+            f"maximum normalized residual: {maxr:.2e}"
         )
         return False, self.maxiter
 
