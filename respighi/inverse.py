@@ -109,6 +109,9 @@ class InverseProblem:
         self._flow_residual = np.empty(self.n, dtype=float)
         self.linearsolver = None
 
+        self._head_update_prev = np.zeros(self.n, dtype=float)
+        self._aitken_work = np.zeros(self.n, dtype=float)
+
         # Extract diagonal indices for efficient Picard updates
         self._A_diag_indices = self._extract_diagonal_indices()
         self.K.data[self._A_diag_indices] = self.gwf.hcof
@@ -335,8 +338,8 @@ class InverseProblem:
             Number of iterations taken.
         """
 
-        if self.linearsolver is None:
-            raise RuntimeError("Must call formulate() before solve")
+        alpha = 1.0
+        have_prev_update = False
 
         # Initial formulation defines the fixed residual scaling.
         self.reformulate(dt=dt)
@@ -347,35 +350,74 @@ class InverseProblem:
         maxdh = np.inf
         maxr = np.inf
         for i in range(self.maxiter):
-            np.copyto(dst=self._x_old, src=self.x)
-            np.copyto(dst=self._head_iter, src=self._head)
+            np.copyto(self._x_old, self.x)
+            np.copyto(self._head_iter, self._head)
+
+            self.linearsolver.factorize()
             self.linear_solve()
+
+            # Raw, signed Picard updates
             np.subtract(self._head, self._head_iter, out=self._head_update)
             np.subtract(self.x, self._x_old, out=self._x_update)
-            maxdh = np.linalg.norm(self._head_update, ord=np.inf)
 
-            np.abs(self._head_update, out=self._head_update)
-            i_max = np.argmax(self._head_update)
-            ijk_max = np.unravel_index(i_max, shape=self.gwf.transmissivity.shape)
+            raw_maxdh = np.linalg.norm(self._head_update, ord=np.inf)
 
-            if self.relax != 1.0:
-                self._x_update *= self.relax
-                np.add(self._x_old, self._x_update, out=self.x)
+            if have_prev_update:
+                # work = d_k - d_{k-1}
+                np.subtract(
+                    self._head_update,
+                    self._head_update_prev,
+                    out=self._aitken_work,
+                )
 
-            # Evaluate at current head
-            self.reformulate(dt=dt)
+                numerator = np.dot(
+                    self._head_update_prev,
+                    self._aitken_work,
+                )
+                denominator = np.dot(
+                    self._aitken_work,
+                    self._aitken_work,
+                )
 
-            # Normalize residuals in-place:
+                if denominator > 0.0:
+                    alpha = -alpha * numerator / denominator
+                    alpha = np.clip(alpha, 0.1, 1.0)
+                else:
+                    alpha = 1.0
+
+            # Save RAW Picard update for next Aitken estimate.
+            np.copyto(self._head_update_prev, self._head_update)
+            have_prev_update = True
+
+            # Apply same alpha to the coupled state.
+            self._head_update *= alpha
+            np.add(self._head_iter, self._head_update, out=self._head)
+
+            self._x_update *= alpha
+            np.add(self._x_old, self._x_update, out=self.x)
+
+            maxdh = alpha * raw_maxdh
+
+            # Evaluate nonlinear residual only for convergence.
+            self._formulate_gwf(dt=dt)
+
             residual = self.flow_residual
             np.abs(residual, out=residual)
             np.divide(residual, rclose, out=residual)
             maxr = residual.max()
 
-            # Check nonlinear convergence
-            print("maxdh: ", maxdh, "maxr: ", maxr)
-            print("i,j,k: ", tuple(int(v) for v in ijk_max))
-            print("head at dhmax: ", float(self._head[i_max]))
-            if (maxdh < self.maxdh) and (maxr < 1.0):
+            print(
+                "raw maxdh:",
+                raw_maxdh,
+                "maxdh:",
+                maxdh,
+                "maxr:",
+                maxr,
+                "alpha:",
+                alpha,
+            )
+
+            if maxdh < self.maxdh and maxr < 1.0:
                 return True, i + 1
 
         warnings.warn(
