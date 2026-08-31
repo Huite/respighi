@@ -75,22 +75,13 @@ WIDTH = 0.01
 
 transmissivity = xr.full_like(subsoil["kh"].isel(layer=0, drop=True), 3000.0)
 
-river = rsp.River.from_dataset(
-    river_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
-large_river = rsp.River.from_dataset(
-    large_river_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
-drain = rsp.Drainage.from_dataset(
-    drain_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
-tiledrain = rsp.Drainage.from_dataset(
-    tiledrain_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
+river = rsp.River.from_dataset(river_ds, smoothing_width=WIDTH)
+large_river = rsp.River.from_dataset(large_river_ds, smoothing_width=WIDTH)
+drain = rsp.Drainage.from_dataset(drain_ds, smoothing_width=WIDTH)
+tiledrain = rsp.Drainage.from_dataset(tiledrain_ds, smoothing_width=WIDTH)
 overlandflow = rsp.Drainage.from_dataset(
     overlandflow_ds,
     constant_conductance=500.0,
-    constant_sigma=BOUNDARY_SIGMA,
     smoothing_width=WIDTH,
 )
 recharge = rsp.Recharge(
@@ -112,8 +103,6 @@ gwf = rsp.GroundwaterModel(
     transmissivity=transmissivity,
     storativity=np.full_like(transmissivity, 0.15),
     horizontal_flow_barriers=[hfb],
-    xclose=1e-5,
-    maxiter=50,
 )
 gwf.formulate()
 gwf.nonlinear_solve()
@@ -140,9 +129,8 @@ target = rsp.CellSampling(
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization=rsp.UnscaledMinimumCurvature(100.0),
-    maxiter=10,
-    maxdh=0.001,
+    regularization=rsp.UnscaledMinimumCurvature(10.0),
+    nonlinear_settings=rsp.NonlinearSettings(relaxation=rsp.ScalarRelaxation(0.5)),
 )
 time = pd.date_range("2025-10-01", "2026-04-01")
 steady = np.full(time.size - 1, False)

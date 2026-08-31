@@ -75,22 +75,13 @@ WIDTH = 0.01
 
 transmissivity = xr.full_like(subsoil["kh"].isel(layer=0, drop=True), 3000.0)
 
-river = rsp.River.from_dataset(
-    river_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
-large_river = rsp.River.from_dataset(
-    large_river_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
-drain = rsp.Drainage.from_dataset(
-    drain_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
-tiledrain = rsp.Drainage.from_dataset(
-    tiledrain_ds, constant_sigma=BOUNDARY_SIGMA, smoothing_width=WIDTH
-)
+river = rsp.River.from_dataset(river_ds, smoothing_width=WIDTH)
+large_river = rsp.River.from_dataset(large_river_ds, smoothing_width=WIDTH)
+drain = rsp.Drainage.from_dataset(drain_ds, smoothing_width=WIDTH)
+tiledrain = rsp.Drainage.from_dataset(tiledrain_ds, smoothing_width=WIDTH)
 overlandflow = rsp.Drainage.from_dataset(
     overlandflow_ds,
     constant_conductance=500.0,
-    constant_sigma=BOUNDARY_SIGMA,
     smoothing_width=WIDTH,
 )
 recharge = rsp.Recharge(
@@ -111,10 +102,7 @@ gwf = rsp.GroundwaterModel(
     head_boundaries=[river, large_river, drain, tiledrain, overlandflow],
     transmissivity=transmissivity,
     horizontal_flow_barriers=[hfb],
-    xclose=1e-6,
-    maxiter=50,
 )
-gwf.formulate()
 gwf.nonlinear_solve()
 gwf.head.isel(layer=0).plot.contour(levels=30)
 
@@ -138,9 +126,7 @@ target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=sigma)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization=rsp.UnscaledMinimumCurvature(1000.0),
-    maxiter=30,
-    maxdh=0.001,
+    regularization=rsp.UnscaledMinimumCurvature(10.0),
 )
 inverse.formulate()
 inverse.nonlinear_solve()
@@ -154,7 +140,7 @@ cs = inversehead.plot.contour(ax=ax, levels=np.arange(15.0, 60.0, 2.0))
 ax.clabel(cs, inline=True, fontsize=8)
 ax.scatter(x, y, color="k", alpha=0.5)
 
-for xi, yi, zi in zip(x, y, target.d):
+for xi, yi, zi in zip(x, y, target.observed):
     ax.annotate(
         f"{zi:.2f}", xy=(xi, yi), xytext=(4, 4), textcoords="offset points", fontsize=7
     )

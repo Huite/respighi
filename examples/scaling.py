@@ -59,8 +59,6 @@ gwf = rsp.GroundwaterModel(
     recharge=recharge,
     head_boundaries=[river, ditch, tube, overlandflow],
     transmissivity=transmissivity,
-    xclose=1e-6,
-    maxiter=50,
 )
 gwf.formulate()
 gwf.nonlinear_solve()
@@ -123,7 +121,6 @@ inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
     regularization=rsp.UnscaledMinimumCurvature(1.0),
-    maxiter=100,
     explicit_residuals=True,
 )
 

@@ -44,8 +44,6 @@ gwf = rsp.GroundwaterModel(
     head_boundaries=[river, ditch, tube, overlandflow],
     transmissivity=transmissivity,
     storativity=xr.full_like(transmissivity, 0.15),
-    xclose=1e-6,
-    maxiter=50,
 )
 gwf.formulate()
 gwf.nonlinear_solve()
