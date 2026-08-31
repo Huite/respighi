@@ -20,7 +20,15 @@ class MatrixType(Enum):
         return self is not MatrixType.NONSYMMETRIC
 
 
-class DirectSolver(abc.ABC):
+class LinearSolver(abc.ABC):
+    @abc.abstractmethod
+    def solve(self): ...
+
+    @abc.abstractmethod
+    def factorize(self): ...
+
+
+class DirectSolver(LinearSolver, abc.ABC):
     def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
         self.A = A
         self.b = b
@@ -28,12 +36,6 @@ class DirectSolver(abc.ABC):
 
     @abc.abstractmethod
     def analyze(self): ...
-
-    @abc.abstractmethod
-    def factorize(self): ...
-
-    @abc.abstractmethod
-    def solve(self): ...
 
     @abc.abstractmethod
     def solve_multi(self, B: FloatArray) -> FloatArray: ...

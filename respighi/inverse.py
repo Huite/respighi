@@ -2,21 +2,27 @@ import platform
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import xarray as xr
 from scipy import sparse
 
-from respighi.constants import BoolArray
+from respighi.constants import BoolArray, FloatArray
 from respighi.groundwaterflow import GroundwaterModel
-from respighi.linearsolvers.direct import MumpsWrapper, make_direct_solver
+from respighi.linearsolvers.mumps import MumpsWrapper
+from respighi.linearsolvers.settings import (
+    LinearSettings,
+    MumpsSettings,
+    PardisoSettings,
+)
 from respighi.linearsolvers.solvertypes import MatrixType
+from respighi.nonlinear import NonlinearIteration, NonlinearSettings
 from respighi.output import zarr_writer
+from respighi.relaxation import AitkenRelaxation
 from respighi.target import FittingTarget
 
 
-class InverseProblem:
+class InverseProblem(NonlinearIteration):
     """
     Inverse problem solver for groundwater model to fit a target head.
 
@@ -42,77 +48,78 @@ class InverseProblem:
         - L: regularization operator (Laplacian)
         - α: regularization weight
 
-    The problem is solved using the Lagrangian approach,
-    forming a saddle-point system. Nonlinearity from head-dependent conductances
-    is handled via Picard iteration.
+    The problem is solved using the Lagrangian approach, forming a saddle-point
+    system. Nonlinearity from head-dependent conductances is handled by the
+    iteration in :class:`NonlinearIteration`.
 
     Parameters
     ----------
     groundwatermodel : GroundwaterModel
-        The groundwater flow model providing system matrices and parameters
+        The groundwater flow model providing system matrices and parameters.
     target : FittingTarget
-        Observation data and operator (P matrix and d vector)
-    regularization_weight : float
-        Weight for spatial smoothness regularization (α)
-    maxiter : int, optional
-        Maximum number of Picard iterations (default: 30)
-    maxdh : float, optional
-        Convergence tolerance for non-linear head updates (default: 1e-4)
-    relax : float, optional
-        Relaxation factor (0-1]. A value of one indicates no relaxation.
-    solver_backend: str, optional: "pardiso", "mumps", "scipy".
-        Which linear solver to use.
-    explicit_residuals: bool, optional
+        Observation data and operator (P matrix and d vector).
+    regularization :
+        Object providing ``build_tikhonov_operator``, which supplies the
+        spatial smoothness operator L.
+    linear_settings : LinearSettings, optional
+        Which linear solver to use. The KKT system is symmetric indefinite, so
+        this must be a direct backend; PCG will refuse it. Defaults to the
+        platform's preferred direct backend.
+    nonlinear_settings : NonlinearSettings, optional
+        Tolerances, iteration budget and relaxation strategy. An
+        :class:`AitkenRelaxation` here must be sized to the head block
+        (``groundwatermodel.n``), not to the full state.
+    explicit_residuals : bool, optional
         Represent observation and regularization residuals as explicit unknowns.
-        This avoids forming ``P.T @ P`` and ``L.T @ L`` and can preserve sparsity when
-        observations represent averages or coarse-model values.
-    symmetric: bool, optional
-        Whether to store only the upper triangle or materialize both halves for a general solver.
-        the system is symmetric, but the general treatment may be more robust in some cases.
+        This avoids forming ``P.T @ P`` and ``L.T @ L`` and can preserve sparsity
+        when observations represent averages or coarse-model values.
+    symmetric : bool, optional
+        Whether to store only the upper triangle or materialize both halves for
+        a general solver. The system is symmetric, but the general treatment may
+        be more robust in some cases.
     """
 
     def __init__(
         self,
         groundwatermodel: GroundwaterModel,
         target: FittingTarget,
-        regularization: float,
-        maxiter: int = 30,
-        maxdh=1e-4,
-        relax=1.0,
-        solver_backend: Literal["pardiso", "mumps", "scipy"] | None = None,
+        regularization,
+        linear_settings: LinearSettings | None = None,
+        nonlinear_settings: NonlinearSettings | None = None,
         explicit_residuals: bool = False,
-        symmetric: bool = True,
+        symmetric: bool | None = None,
     ):
-        # On macOS: Default to MUMPS instead of Intel Pardiso
-        if solver_backend is None:
-            solver_backend = "mumps" if platform.system() == "Darwin" else "pardiso"
-        self.solver_backend = solver_backend
         self.explicit_residuals = explicit_residuals
-        self.symmetric = symmetric
 
-        # Store core attributes
+        # The sparsity structure is static, so symbolic analysis happens once,
+        # inside build. Numeric factorization is deferred to linear_solve.
+        if linear_settings is None:
+            if platform.system == "Darwin":
+                self.linear_settings = MumpsSettings()
+            else:
+                self.linear_settings = PardisoSettings()
+
+        if symmetric is None:
+            # PARDISO is not very reliable with the symmetric form.
+            if isinstance(self.linear_settings, PardisoSettings):
+                self.symmetric = False
+            else:
+                self.symmetric = True
+        else:
+            self.symmetric = symmetric
+
         self.gwf = groundwatermodel
         self.target = target
         self.n = self.gwf.n
         self.layer_n = self.gwf.layer_n
-        self.regularization_weight = regularization
-        self.maxiter = maxiter
-        self.maxdh = maxdh
-        self.relax = relax
+        self.regularization = regularization
+
         self.K, self.Pt, self.matrix_type = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
         self.x = np.zeros_like(self.rhs, dtype=float)
-        self._x_old = np.zeros_like(self.rhs, dtype=float)
-        self._x_update = np.zeros_like(self.rhs, dtype=float)
-        self._head_iter = np.zeros(self.n, dtype=float)
-        self._head_update = np.zeros(self.n, dtype=float)
         self._flow_residual = np.empty(self.n, dtype=float)
-        self.linearsolver = None
 
-        self._head_update_prev = np.zeros(self.n, dtype=float)
-        self._aitken_work = np.zeros(self.n, dtype=float)
-
-        # Extract diagonal indices for efficient Picard updates
+        # Extract diagonal indices for efficient updates
         self._A_diag_indices = self._extract_diagonal_indices()
         self.K.data[self._A_diag_indices] = self.gwf.hcof
 
@@ -128,7 +135,20 @@ class InverseProblem:
         self.rhs_obs_slice = slice(obs_start, obs_start + n_obs_rhs)
         self.rhs_flow_slice = slice(flow_start, flow_start + self.n)
 
-    def _build_matrix(self, regularization) -> sparse.csr_matrix:
+        self.linearsolver = self.linear_settings.build(
+            self.K, self.rhs, self.x, self.matrix_type
+        )
+        if nonlinear_settings is None:
+            # Default to AitkenRelaxation for robustness
+            self.nonlinear_settings = NonlinearSettings(
+                relaxation=AitkenRelaxation(n=self.gwf.n)
+            )
+        else:
+            self.nonlinear_settings = nonlinear_settings
+
+    def _build_matrix(
+        self, regularization
+    ) -> tuple[sparse.csr_matrix, sparse.spmatrix, MatrixType]:
         """Build optimality system matrix.
 
         Optimality conditions:
@@ -141,16 +161,21 @@ class InverseProblem:
         - A h - Q r = b_bc
         - P h - e = d
         - L r - s = 0
+
+        Returns the matrix, the observation operator transpose, and the matrix
+        type for the linear solver.
         """
         # Mark diagonals with sentinel for later extraction
         A = self.gwf.A.copy()
         A.setdiag(np.inf)
 
         P = self.target.P
-        Pt = P.T
         if P.shape[1] < self.n:
             padding = sparse.csr_matrix((P.shape[0], self.n - P.shape[1]))
-            P = sparse.hstack([P, padding])
+            P = sparse.hstack([P, padding]).tocsr()
+        # Transposed after padding: taking it beforehand leaves an operator with
+        # too few rows, which silently misshapes both P^T P and the RHS.
+        Pt = P.T.tocsr()
 
         # NOTE:
         # Assumes constant cell sizes, and dx == dy.
@@ -234,21 +259,20 @@ class InverseProblem:
     def _extract_diagonal_indices(self) -> np.ndarray:
         """
         Extract the CSR data indices of the A^T and A diagonals for efficient
-        Picard updates.
+        updates.
 
         During ``_build_matrix``, the diagonals of both A and A^T are set to
         ``inf`` as sentinels. This method locates those entries in the CSR data
-        array so that ``_formulate_gwf`` can patch them in-place without
+        array so that :meth:`formulate` can patch them in-place without
         rebuilding the matrix. The first ``n`` inf entries correspond to A^T
         (upper block) and the second ``n`` to A (lower block), reflecting their
-        order in the block structure.
+        order in the block structure. Only the upper triangle is stored in the
+        symmetric case, hence the two admissible counts.
 
         Returns
         -------
-        at_indices: np.ndarray
-            CSR data indices of the A^T diagonal entries.
-        a_indices: np.ndarray
-            CSR data indices of the A diagonal entries.
+        indices: np.ndarray of shape (1, n) or (2, n)
+            CSR data indices of the groundwater diagonal entries.
         """
         indices = np.flatnonzero(np.isinf(self.K.data))
         if indices.size not in (self.n, 2 * self.n):
@@ -258,176 +282,63 @@ class InverseProblem:
             )
         return indices.reshape(-1, self.n)
 
-    def _formulate_gwf(self, dt):
+    @property
+    def state(self) -> FloatArray:
+        """Full solution vector, written in place by the linear solver."""
+        return self.x
+
+    @property
+    def diagonal(self) -> FloatArray:
+        """Groundwater diagonal, used to scale the flow residual."""
+        return self.gwf.hcof
+
+    def primary(self, vector: FloatArray) -> FloatArray:
+        """Select the head block, on which convergence is judged."""
+        return vector[: self.n]
+
+    def formulate(self, dt=None) -> None:
         """
         Update the groundwater flow contributions in the optimality system.
 
-        Calls ``GroundwaterModel.formulate`` (without recharge, as recharge is
-        a free variable here), then patches the diagonal entries of ``A`` and
+        Calls ``GroundwaterModel.formulate`` without recharge, since recharge
+        is a free variable here, then patches the diagonal entries of ``A`` and
         ``A^T`` in the block matrix and updates the flow equation RHS slice.
+
+        Parameters
+        ----------
+        dt:
+            Time step size. Set to None for steady state.
         """
-        np.copyto(self.gwf._head, self._head)
-        self.gwf.formulate(recharge=False, dt=dt)
+        np.copyto(dst=self.gwf._head, src=self._head)
+        self.gwf.formulate(dt=dt, recharge=False)
         self.K.data[self._A_diag_indices] = self.gwf.hcof
         self.rhs[self.rhs_flow_slice] = self.gwf.rhs
         return
 
-    def formulate(self, dt=None):
-        """
-        Formulate the system of equations, call PARDISO's analysis (phase 11)
-        and numerical factorization (phase 22).
-        """
-        self._formulate_gwf(dt=dt)
-        self.linearsolver = make_direct_solver(
-            self.solver_backend, self.K, self.rhs, self.x, matrix_type=self.matrix_type
-        )
-        # Analysis is the most costly phase.
-        self.linearsolver.analyze()
+    def linear_solve(self) -> tuple[bool, int]:
+        """Solve the KKT system for ``[h, r, lambda]``, in place."""
         self.linearsolver.factorize()
+        return self.linearsolver.solve()
 
-    def reformulate(self, dt=None):
+    def residual(self) -> FloatArray:
         """
-        Formulate the system of equations, call PARDISO's numerical
-        factorization; unlike ``.formulate``, this does not call the expensive
-        analysis phase.
+        Residual of ``A h - Q r = b_bc``, including the recharge coupling.
+
+        Head-sized, matching the convergence subspace. Computed into a work
+        array reused on every call, so the result is invalidated by the next.
         """
-        # Structure is static, reuse results of analysis.
-        self._formulate_gwf(dt=dt)
-        self.linearsolver.factorize()
-
-    def linear_solve(self):
-        """Solve the linear system for ``[h, r, λ]^T``."""
-        if self.linearsolver is None:
-            raise RuntimeError("Must call formulate() before solve")
-        self.linearsolver.solve()
-        return
-
-    @property
-    def flow_residual(self) -> np.ndarray:
-        """Residual of ``A h - Q r = b_bc``, including the recharge coupling."""
-        self._flow_residual[:] = 0.0
         np.multiply(
             self.gwf.area, self._recharge, out=self._flow_residual[: self.layer_n]
         )
-        self._flow_residual += self.gwf.residual
+        self._flow_residual[self.layer_n :] = 0.0
+        self._flow_residual += self.gwf.residual()
         return self._flow_residual
 
-    def nonlinear_solve(self, dt=None):
-        """
-        Solve the nonlinear system for ``[h, r, λ]^T`` using Picard iteration.
-
-        At each iteration, the linear system is solved and the head update is
-        checked for convergence. Convergence is assessed on head only —
-        specifically the infinity norm of the head change between iterations —
-        rather than on the full solution vector, since head is the physically
-        meaningful quantity and recharge and Lagrange multipliers are derived
-        from it. A relaxation factor (``relax``) can be applied to damp
-        oscillations if the iteration is slow to converge.
-
-        Call ``.formulate()`` before calling this method.
-
-        Parameters
-        ----------
-        (none)
-
-        Returns
-        -------
-        converged: bool
-            Whether the head update fell below ``maxdh``.
-        iterations: int
-            Number of iterations taken.
-        """
-
-        alpha = 1.0
-        have_prev_update = False
-
-        # Initial formulation defines the fixed residual scaling.
-        self.reformulate(dt=dt)
-        rclose = self.gwf._rclose
-        np.abs(self.gwf.hcof, out=rclose)
-        rclose *= self.maxdh
-
-        maxdh = np.inf
-        maxr = np.inf
-        for i in range(self.maxiter):
-            np.copyto(self._x_old, self.x)
-            np.copyto(self._head_iter, self._head)
-
-            self.linearsolver.factorize()
-            self.linear_solve()
-
-            # Raw, signed Picard updates
-            np.subtract(self._head, self._head_iter, out=self._head_update)
-            np.subtract(self.x, self._x_old, out=self._x_update)
-
-            raw_maxdh = np.linalg.norm(self._head_update, ord=np.inf)
-
-            if have_prev_update:
-                # work = d_k - d_{k-1}
-                np.subtract(
-                    self._head_update,
-                    self._head_update_prev,
-                    out=self._aitken_work,
-                )
-
-                numerator = np.dot(
-                    self._head_update_prev,
-                    self._aitken_work,
-                )
-                denominator = np.dot(
-                    self._aitken_work,
-                    self._aitken_work,
-                )
-
-                if denominator > 0.0:
-                    alpha = -alpha * numerator / denominator
-                    alpha = np.clip(alpha, 0.1, 1.0)
-                else:
-                    alpha = 1.0
-
-            # Save RAW Picard update for next Aitken estimate.
-            np.copyto(self._head_update_prev, self._head_update)
-            have_prev_update = True
-
-            # Apply same alpha to the coupled state.
-            self._head_update *= alpha
-            np.add(self._head_iter, self._head_update, out=self._head)
-
-            self._x_update *= alpha
-            np.add(self._x_old, self._x_update, out=self.x)
-
-            maxdh = alpha * raw_maxdh
-
-            # Evaluate nonlinear residual only for convergence.
-            self._formulate_gwf(dt=dt)
-
-            residual = self.flow_residual
-            np.abs(residual, out=residual)
-            np.divide(residual, rclose, out=residual)
-            maxr = residual.max()
-
-            print(
-                "raw maxdh:",
-                raw_maxdh,
-                "maxdh:",
-                maxdh,
-                "maxr:",
-                maxr,
-                "alpha:",
-                alpha,
-            )
-
-            if maxdh < self.maxdh and maxr < 1.0:
-                return True, i + 1
-
-        warnings.warn(
-            f"Nonlinear solver did not converge after {self.maxiter} iterations. "
-            f"Final update: {maxdh:.2e}; "
-            f"maximum normalized residual: {maxr:.2e}"
-        )
-        return False, self.maxiter
-
-    def advance(self, time_index: int):
+    def advance(self, time_index: int) -> None:
+        """Move the model and the observations to the next time step."""
+        # Sync head into the flow model first: gwf.advance rolls its own head
+        # into head_old, and its copy is only refreshed during formulate.
+        np.copyto(dst=self.gwf._head, src=self._head)
         self.gwf.advance(time_index)
         self.target.advance(time_index)
         # Now copy over the observations from the target to the rhs.
@@ -443,20 +354,27 @@ class InverseProblem:
         steady_state: bool | BoolArray = True,
     ) -> xr.Dataset:
         """
-        Run a transient or batched inverse solve over a sequence of time steps.
+        Run an inverse solve over a sequence of time steps.
 
-        Re-uses the analysis phase of the linear solver, and iterates over time
-        steps, updating observations and refactorizing at each step.
+        Reuses the solver's symbolic analysis across steps, updating
+        observations and refactorizing at each one.
 
         Parameters
         ----------
         time:
+            Time axis. ``n`` stamps define ``n - 1`` steps; results are written
+            against ``time[:-1]``.
         path:
-        steady_state: bool or array of bools
+            Destination for the zarr store. A temporary directory is used, and
+            cleaned up when the returned dataset is closed, if omitted.
+        steady_state:
+            Whether each step is steady state. A scalar applies to every step;
+            an array must be broadcastable to the number of steps.
 
         Returns
         -------
-        xarray.Dataset
+        xr.Dataset
+            Head, recharge, convergence flag and iteration count per step.
         """
         tmp = None
         if path is None:
@@ -464,12 +382,11 @@ class InverseProblem:
             path = Path(tmp.name) / "inverse-results.zarr"
 
         nlayer, ny, nx = self.gwf.transmissivity.shape
-        dts = time.diff().days[1:]
+        dts = self.gwf._timestep_sizes(time)
         steady = np.broadcast_to(steady_state, len(dts))
         self.gwf.bind_time(time)
         self.target.bind_time(time)
         np.copyto(dst=self._head, src=self.gwf.initial)
-        self.formulate(dt=None)
 
         with zarr_writer(
             path=path, time=time[:-1], dims=("layer", "y", "x"), coords=self.gwf._coords
@@ -480,9 +397,9 @@ class InverseProblem:
             zarr_iterations = group["iterations"]
             for i, dt in enumerate(dts):
                 self.advance(i)
-                zarr_converged[i], zarr_iterations[i] = self.nonlinear_solve(
-                    dt=None if steady[i] else dt
-                )
+                result = self.nonlinear_solve(dt=None if steady[i] else dt)
+                zarr_converged[i] = result.converged
+                zarr_iterations[i] = result.iterations
                 zarr_head[i] = self._head.reshape((nlayer, ny, nx))
                 zarr_recharge[i] = self._recharge.reshape((ny, nx))
 
@@ -503,7 +420,7 @@ class InverseProblem:
 
     @property
     def _lagrangian(self):
-        """Current Lagrange multipliers; the final ``layer_n`` entries of the solution vector."""
+        """Current Lagrange multipliers; the final ``n`` entries of the solution vector."""
         return self.x[-self.n :]
 
     @property
@@ -569,11 +486,6 @@ class InverseProblem:
             Local linear mapping from observation perturbations to head
             perturbations.
         """
-        if self.linearsolver is None:
-            raise RuntimeError(
-                "Must call formulate() before computing the observation mapping"
-            )
-
         if self.explicit_residuals:
             raise RuntimeError(
                 "observation_mapping_matrix() assumes the non-explicit "
@@ -609,7 +521,7 @@ class InverseProblem:
                 ``(layer, y, x)``.
             - ``observation_reference``: reference observation values, with
                 dimension ``(observation,)``.
-            - ``W``: observation-to-head mapping, with dimensions
+            - ``weights``: observation-to-head mapping, with dimensions
                 ``(layer, y, x, observation)``.
         """
         W = self.observation_mapping_matrix()
@@ -633,39 +545,28 @@ class InverseProblem:
             },
         )
 
-    def boundary_influence_functions(self):
+    def estimate_variance(self) -> xr.DataArray:
         """
-        Compute head influence functions for all head boundaries.
+        Posterior variance of the head estimate, from the inverse diagonal.
 
-        Column k gives psi_k = dh / d delta_k, the sensitivity of the head
-        field to a conductance-and-sigma-weighted coherent shift of boundary k.
+        Requires a backend like MUMPS that can return entries of the inverse;
+        constructs a MUMPS linear solver if not available.
         """
-        if self.linearsolver is None:
-            raise RuntimeError("Must call formulate() before influence estimation")
-
-        N = len(self.rhs)
-        n_boundaries = len(self.gwf.head_boundaries)
-        flow_start = self.rhs_flow_slice.start
-
-        B = np.zeros((N, n_boundaries))
-        for k, boundary in enumerate(self.gwf.head_boundaries):
-            B[flow_start : flow_start + self.n, k] = (
-                boundary.conductance.ravel() * boundary.sigma.ravel()
-            )
-
-        X = self.linearsolver.solve_multi(B)
-        return X[: self.n, :]
-
-    def estimate_variance(self):
         # Only mumps supports inverted entries properly.
-        if not isinstance(self.linearsolver, MumpsWrapper):
-            linearsolver = make_direct_solver(
-                "mumps", self.K, self.rhs, self.x, matrix_type=self.matrix_type
+        if isinstance(self.linearsolver, MumpsWrapper):
+            linearsolver = self.linearsolver
+        else:
+            # TODO: maybe bind result in a separate MUMPS instance as to support
+            # "batched" variance estimates?
+            warnings.warn(
+                "Current linear solver is not MUMPS. Only MUMPS supports "
+                "selected inversion, refactorizing and solving with MUMPS now."
+            )
+            linearsolver = MumpsWrapper(
+                self.K, self.rhs, self.x, matrix_type=self.matrix_type
             )
             linearsolver.analyze()
             linearsolver.factorize()
-        else:
-            linearsolver = self.linearsolver
 
         variance = linearsolver.inverse_diagonal(indices=np.arange(self.n))
         return xr.DataArray(

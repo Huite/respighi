@@ -1,45 +1,87 @@
 import abc
 import tempfile
-import warnings
 from pathlib import Path
 from typing import Sequence
 
 import geopandas as gpd
 import numpy as np
-import pypardiso
 import xarray as xr
 import xugrid as xu
 from scipy import sparse
 from scipy.sparse._sparsetools import csr_matvec
 
 from respighi.constants import BoolArray, FloatArray, IntArray
-from respighi.linearsolvers.cg import PCGSolver
-from respighi.linearsolvers.ilu0 import ILU0Preconditioner
+from respighi.linearsolvers.settings import LinearSettings, PCGSettings
+from respighi.linearsolvers.solvertypes import MatrixType
+from respighi.nonlinear import NonlinearIteration, NonlinearSettings
 from respighi.output import zarr_writer
 
 
 def constant_helper(dataset, template_var, constant, name):
+    """
+    Resolve a field that may be given as a constant or as a dataset variable.
+
+    Returns None when neither is available, so callers must handle a missing
+    optional field rather than assuming a DataArray comes back.
+    """
     if constant is not None:
         template = dataset[template_var]
         return xr.full_like(template, constant).where(template.notnull())
-    else:
-        return dataset.get(name)
+    return dataset.get(name)
+
+
+def _to_array(dataarray):
+    """Fill missing values with zero and return a flat float array, or None."""
+    if dataarray is None:
+        return None
+    return dataarray.fillna(0.0).to_numpy().ravel()
 
 
 class Boundary(abc.ABC):
-    @abc.abstractmethod
-    def formulate(self):
-        pass
+    """
+    Interface for boundary conditions contributing to the linear system.
+
+    All boundaries share one ``formulate`` signature so that the model can
+    accumulate them in a single loop. Boundaries that do not need every
+    argument simply ignore it.
+    """
 
     @abc.abstractmethod
-    def from_dataset(self):
-        pass
+    def formulate(self, hcof: FloatArray, rhs: FloatArray, head: FloatArray) -> None:
+        """
+        Accumulate this boundary's contribution into the diagonal and RHS.
 
-    def advance(self, time_index: int):
-        pass
+        Parameters
+        ----------
+        hcof:
+            Diagonal of the system matrix. Added to in place.
+        rhs:
+            Right hand side vector. Added to in place.
+        head:
+            Current head, for head-dependent boundaries.
+        """
 
-    def bind_time(self, time):
-        pass
+    @classmethod
+    @abc.abstractmethod
+    def from_dataset(cls, dataset):
+        """Construct from an xarray Dataset of boundary parameters."""
+
+    def bind_grid(self, area: float) -> None:
+        """
+        Receive grid geometry from the model at construction.
+
+        Default is a no-op; boundaries whose contribution scales with cell
+        area override this.
+        """
+        return
+
+    def advance(self, time_index: int) -> None:
+        """Move to the given time step. Default is a no-op."""
+        return
+
+    def bind_time(self, time) -> None:
+        """Receive the simulation time axis. Default is a no-op."""
+        return
 
 
 class Recharge(Boundary):
@@ -50,27 +92,32 @@ class Recharge(Boundary):
     """
 
     rate: FloatArray
+    area: float | None
     _rhs: FloatArray
 
-    def __init__(self, rate):
+    def __init__(self, rate, area=None):
         self.rate = rate.ravel()
+        self.area = area
         self._rhs = np.empty_like(self.rate)
 
-    def formulate(self, rhs, area):
-        np.multiply(self.rate, area, out=self._rhs)
+    def bind_grid(self, area: float) -> None:
+        self.area = area
+
+    def formulate(self, hcof, rhs, head):
+        if self.area is None:
+            raise RuntimeError("bind_grid must be called before formulate")
+        np.multiply(self.rate, self.area, out=self._rhs)
         rhs += self._rhs
         return
 
     @classmethod
     def from_dataset(cls, dataset):
-        return cls(
-            rate=dataset["rate"].fillna(0.0).to_numpy(),
-        )
+        return cls(rate=dataset["rate"].fillna(0.0).to_numpy())
 
 
 class HeadBoundary(Boundary):
     """
-    Fixed-head  boundary condition.
+    Fixed-head boundary condition.
 
     Adds a conductance term to the diagonal and a corresponding RHS contribution,
     driving the head toward the specified boundary head value.
@@ -79,13 +126,11 @@ class HeadBoundary(Boundary):
     conductance: FloatArray
     head: FloatArray
     _rhs: FloatArray
-    sigma: None | FloatArray
 
-    def __init__(self, conductance, head, sigma=None):
+    def __init__(self, conductance, head):
         self.conductance = conductance.ravel()
         self.head = head.ravel()
         self._rhs = np.empty_like(self.conductance)
-        self.sigma = sigma
 
     def formulate(self, hcof, rhs, head):
         hcof += self.conductance
@@ -94,20 +139,24 @@ class HeadBoundary(Boundary):
         return
 
     @classmethod
-    def from_dataset(cls, dataset, constant_sigma=None):
-        sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
+    def from_dataset(cls, dataset):
         return cls(
             conductance=dataset["conductance"].fillna(0.0).to_numpy(),
             head=dataset["head"].fillna(0.0).to_numpy(),
-            sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
         )
 
 
 def _smoothstep_inplace(x, width, work):
     """
     Transform x in place from a signed distance to a threshold
-    (e.g. head - elevation) into a smoothed activation weight in [0, 1]
-    via a C1-continuous piecewise quadratic.
+    (e.g. head - elevation) into an activation weight in [0, 1], and write the
+    accompanying offset term into work.
+
+    The weight is a clipped linear ramp across an interval of ``width``. The
+    offset ``0.5 * width * t * (1 - t)`` is what makes the resulting flux a
+    C1-continuous piecewise quadratic: combining them gives ``0.5 * C * w * t**2``,
+    whose derivative ``C * t`` matches the fully active branch at t = 1 and
+    vanishes at t = 0.
 
     x and work are preallocated arrays of the same shape; both are overwritten.
     """
@@ -127,6 +176,10 @@ class Drainage(Boundary):
     from inactive to a head boundary at the drain elevation over an interval
     `smoothing_width`, instead of switching discontinuously like the classical
     Drainage package.
+
+    The diagonal contribution ``C * t`` is the exact derivative of the smoothed
+    flux, so this term is linearised by its tangent rather than by a lagged
+    coefficient.
     """
 
     conductance: FloatArray
@@ -134,16 +187,18 @@ class Drainage(Boundary):
     _celev: FloatArray
     _weight: FloatArray
     _rhs: FloatArray
-    sigma: None | FloatArray
     smoothing_width: float
 
-    def __init__(self, conductance, elevation, sigma=None, smoothing_width=0.01):
+    def __init__(self, conductance, elevation, smoothing_width=0.01):
+        if smoothing_width <= 0.0:
+            raise ValueError(
+                f"smoothing_width must be positive, got: {smoothing_width}"
+            )
         self.conductance = conductance.ravel()
         self.elevation = elevation.ravel()
         self._celev = self.conductance * self.elevation  # constant: C * elevation
         self._weight = np.empty_like(self.conductance)
         self._rhs = np.empty_like(self.conductance)
-        self.sigma = sigma
         self.smoothing_width = smoothing_width
 
     def formulate(self, hcof, rhs, head):
@@ -165,17 +220,18 @@ class Drainage(Boundary):
         cls,
         dataset,
         constant_conductance=None,
-        constant_sigma=None,
         smoothing_width=0.01,
     ):
         conductance = constant_helper(
             dataset, "elevation", constant_conductance, "conductance"
         )
-        sigma = constant_helper(dataset, "elevation", constant_sigma, "sigma")
+        if conductance is None:
+            raise ValueError(
+                "Drainage requires a 'conductance' variable or constant_conductance."
+            )
         return cls(
             conductance=conductance.fillna(0.0).to_numpy(),
             elevation=dataset["elevation"].fillna(0.0).to_numpy(),
-            sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
             smoothing_width=smoothing_width,
         )
 
@@ -197,12 +253,13 @@ class River(Boundary):
     _cbot: FloatArray
     _weight: FloatArray
     _rhs: FloatArray
-    sigma: None | FloatArray
     smoothing_width: float
 
-    def __init__(
-        self, conductance, stage, bottom_elevation, sigma=None, smoothing_width=0.01
-    ):
+    def __init__(self, conductance, stage, bottom_elevation, smoothing_width=0.01):
+        if smoothing_width <= 0.0:
+            raise ValueError(
+                f"smoothing_width must be positive, got: {smoothing_width}"
+            )
         self.conductance = conductance.ravel()
         self.stage = stage.ravel()
         self.bottom_elevation = bottom_elevation.ravel()
@@ -210,7 +267,6 @@ class River(Boundary):
         self._cbot = self.conductance * self.bottom_elevation
         self._weight = np.empty_like(self.conductance)
         self._rhs = np.empty_like(self.conductance)
-        self.sigma = sigma
         self.smoothing_width = smoothing_width
 
     def formulate(self, hcof, rhs, head):
@@ -226,19 +282,24 @@ class River(Boundary):
         return
 
     @classmethod
-    def from_dataset(cls, dataset, constant_sigma=None, smoothing_width=0.01):
-        sigma = constant_helper(dataset, "conductance", constant_sigma, "sigma")
+    def from_dataset(cls, dataset, smoothing_width=0.01):
         return cls(
             conductance=dataset["conductance"].fillna(0.0).to_numpy(),
             stage=dataset["stage"].fillna(0.0).to_numpy(),
             bottom_elevation=dataset["bottom_elevation"].fillna(0.0).to_numpy(),
-            sigma=None if sigma is None else sigma.fillna(0.0).to_numpy(),
             smoothing_width=smoothing_width,
         )
 
 
 class HorizontalFlowBarrier:
-    layer: IntArray  # TODO: 0-based indexing or 1-based? Currently 0-based.
+    """
+    Resistance applied to the connection between two laterally adjacent cells.
+
+    Static in time: the modification to intercell conductances is applied once,
+    at model construction.
+    """
+
+    layer: int  # 0-based
     cell0: IntArray
     cell1: IntArray
     resistance: FloatArray
@@ -282,10 +343,10 @@ class HorizontalFlowBarrier:
     def modify_conductance(self, transmissivity: FloatArray):
         _, ny, nx = transmissivity.shape
         layer_size = ny * nx
-        if self.cell0.max() > layer_size:
-            raise ValueError("HFB cell0 index exceeds number of cells in a layer")
-        if self.cell1.max() > layer_size:
-            raise ValueError("HFB cell1 index exceeds number of cells in a layer")
+        if self.cell0.size == 0:
+            return [], [], []
+        if self.cell0.max() >= layer_size or self.cell1.max() >= layer_size:
+            raise ValueError("HFB cell index exceeds number of cells in a layer")
         # Utilize a negative correction: duplicate summing of the COO matrix does the
         # necessary work.
         kD = transmissivity.ravel()
@@ -306,7 +367,37 @@ def atleast_3d_front(a):
     return a.copy()
 
 
-class GroundwaterModel:
+def _csr_diagonal_indices(A: sparse.csr_matrix) -> IntArray:
+    """
+    Locate the diagonal entries of a CSR matrix within its data array.
+
+    Assigning through these indices replaces the diagonal in O(n) without the
+    structural checks ``setdiag`` performs on every call.
+
+    Raises
+    ------
+    ValueError
+        If any diagonal entry is not stored explicitly.
+    """
+    n = A.shape[0]
+    rows = np.repeat(np.arange(n), np.diff(A.indptr))
+    indices = np.flatnonzero(A.indices == rows)
+    if indices.size != n:
+        raise ValueError(
+            f"Matrix is missing {n - indices.size} explicit diagonal entries."
+        )
+    return indices
+
+
+class GroundwaterModel(NonlinearIteration):
+    """
+    Confined groundwater flow model.
+
+    The nonlinear iteration itself lives in :class:`NonlinearIteration`; this
+    class supplies the formulation, the linear solve, and the residual. State
+    and convergence space coincide here, so :meth:`primary` is the identity.
+    """
+
     def __init__(
         self,
         area,
@@ -317,16 +408,11 @@ class GroundwaterModel:
         resistance: FloatArray | None = None,
         storativity: FloatArray | None = None,
         horizontal_flow_barriers: Sequence[HorizontalFlowBarrier] = (),
-        xclose_linear: float = 1e-5,
-        rclose_linear: float = 1e-5,
-        maxiter_linear: int = 100,
-        xclose: float = 1e-4,
-        maxiter: int = 30,
-        relax: float = 1.0,
+        linear_settings: LinearSettings | None = None,
+        nonlinear_settings: NonlinearSettings | None = None,
+        symmetric: bool | None = None,
     ):
         """
-        Confined groundwater flow model.
-
         Parameters
         ----------
         area: float
@@ -339,28 +425,27 @@ class GroundwaterModel:
             Boundaries such as drainage, river, (linear) head boundary.
         transmissivity: np.ndarray of floats
             May be shaped ``(ny, nx)`` for a single layer model;
-            or shaped ``(nlayer, ny, nx``) for multi-layer models.
+            or shaped ``(nlayer, ny, nx)`` for multi-layer models.
         resistance: np.ndarray of floats, optional
             May be shaped ``(ny, nx)`` for a two layer model;
-            or shaped ``(nlayer - 1, ny, nx``) for more layers.
+            or shaped ``(nlayer - 1, ny, nx)`` for more layers.
         storativity: np.ndarray of floats, optional
             May be shaped ``(ny, nx)`` for a single layer model;
-            or shaped ``(nlayer, ny, nx``) for multi-layer models.
+            or shaped ``(nlayer, ny, nx)`` for multi-layer models.
         horizontal_flow_barriers: sequence of HorizontalFlowBarrier, optional
             Horizontal flow barriers. These are static in time: the modification
             to intercell conductances is made at model initialization.
-        xclose_linear: optional, float, default is 1e-5
-            Linear convergence criterion
-        rclose_linear: optional, float, default is 1e-5
-            Linear convergence criterion
-        maxiter_linear: int = 100,
-            Maximum number of linear solver iterations.
-        xclose: float = 1e-4,
-            Non-linear convergence criterion.
-        maxiter: int = 30,
-            Maximum number of non-linear iterations.
-        relax: float = 1.0
-            Relaxation factor (0-1]. A value of one indicates no relaxation.
+        linear_settings: LinearSettings, optional
+            Which linear solver to use and how to configure it. Defaults to
+            :class:`PCGSettings`.
+        nonlinear_settings: NonlinearSettings, optional
+            Tolerances, iteration budget and relaxation strategy for the
+            nonlinear iteration. Defaults to undamped with the
+            :class:`NonlinearSettings` defaults.
+        symmetric : bool, optional
+            Whether to store only the upper triangle or materialize both halves for
+            a general solver. The system is symmetric, but the general treatment may
+            be more robust in some cases.
         """
         transmissivity_3d = atleast_3d_front(transmissivity)
         initial_3d = atleast_3d_front(initial)
@@ -424,11 +509,13 @@ class GroundwaterModel:
         self._head = self.initial.astype(float, copy=True)
         # Work arrays
         self._head_old = self._head.astype(float, copy=True)
-        self._head_iter = np.empty_like(self._head, dtype=float)
         self._storage_work = np.empty_like(self.storativity, dtype=float)
-        self._update = np.empty_like(self._head, dtype=float)
         self._residual = np.empty_like(self._head, dtype=float)
-        self._rclose = np.empty_like(self._head, dtype=float)
+
+        # Boundaries that scale with cell area need it before first formulation.
+        self.recharge.bind_grid(area)
+        for boundary in self.head_boundaries:
+            boundary.bind_grid(area)
 
         # Matrix assembly
         self.W = self._build_conductance(
@@ -441,22 +528,62 @@ class GroundwaterModel:
         # Compute the (weighted) degree matrix
         self.D = np.asarray(self.W.sum(axis=1)).ravel()
         self.hcof = self.D.copy()
-        # Compute the Laplacian
-        self.Abase = sparse.diags(self.D) - self.W
-        self.A = self.Abase.copy()
+        # Compute the Laplacian. Force explicit storage of the diagonal, since
+        # cells with a zero degree would otherwise leave a structural hole that
+        # the per-iteration diagonal assignment cannot fill.
+        A = sparse.diags(self.D) - self.W
+        if symmetric:
+            self.A = sparse.triu(A).tocsr()
+            self.matrix_type = MatrixType.SYMMETRIC_POSITIVE_DEFINITE
+        else:
+            self.A = A.tocsr()
+            self.matrix_type = MatrixType.NONSYMMETRIC
 
-        self.linearsolver = PCGSolver(
-            self.A,
-            self.rhs,
-            self._head,
-            ILU0Preconditioner.from_csr_matrix(self.A),
-            xclose=xclose_linear,
-            rclose=rclose_linear,
-            maxiter=maxiter_linear,
+        self._diag_indices = _csr_diagonal_indices(self.A)
+        # The linear solver holds A, rhs and head by reference, so formulate
+        # must mutate them in place rather than rebind them.
+        self.A.data[self._diag_indices] = self.hcof
+        self.linear_settings = (
+            linear_settings if linear_settings is not None else PCGSettings()
         )
-        self.maxiter = maxiter
-        self.xclose = xclose
-        self.relax = relax
+        self.linearsolver = self.linear_settings.build(
+            self.A, self.rhs, self._head, self.matrix_type
+        )
+        self.nonlinear_settings = (
+            nonlinear_settings
+            if nonlinear_settings is not None
+            else NonlinearSettings()
+        )
+
+    @property
+    def state(self) -> FloatArray:
+        """Live head vector, written in place by the linear solver."""
+        return self._head
+
+    @property
+    def diagonal(self) -> FloatArray:
+        """Diagonal of the assembled system, used to scale residuals."""
+        return self.hcof
+
+    def primary(self, vector) -> FloatArray:
+        """Head is the whole state here."""
+        return vector
+
+    def residual(self) -> FloatArray:
+        """
+        Residual ``b - A @ h`` for the current head and formulation.
+
+        Computed into a work array that is reused on every call, so the result
+        is invalidated by the next one. Assumes the matrix diagonal is already
+        synchronised with ``hcof``, which :meth:`formulate` guarantees.
+        """
+        A = self.A
+        # csr_matvec accumulates (y += A @ x), so negate around it rather
+        # than allocating a temporary for A @ x.
+        np.negative(self.rhs, out=self._residual)
+        csr_matvec(*A.shape, A.indptr, A.indices, A.data, self._head, self._residual)
+        np.negative(self._residual, out=self._residual)
+        return self._residual
 
     @classmethod
     def build_connectivity(cls, shape):
@@ -469,7 +596,6 @@ class GroundwaterModel:
         Each pair appears twice — once in each direction — yielding a symmetric
         sparsity pattern suitable for the conductance matrix.
         """
-
         size = np.prod(shape)
         index = np.arange(size).reshape(shape)
         # Build nD connectivity
@@ -504,7 +630,6 @@ class GroundwaterModel:
         Returns a CSR sparse matrix of shape ``(n, n)`` where ``n`` is the total
         number of cells.
         """
-
         # Get the Cartesian neighbors for a finite difference approximation.
         # TODO: check order of dimensions with DataArray
         _, ny, nx = transmissivity.shape
@@ -543,22 +668,29 @@ class GroundwaterModel:
             shape=(size, size),
         ).tocsr()
 
-    def formulate(self, recharge=True, dt=None):
+    def formulate(self, dt=None, recharge=True):
         """
-        Assemble the RHS vector and diagonal (hcof) for the current iteration.
+        Assemble the RHS vector and system matrix for the current iteration.
 
         Resets RHS and diagonal to their base values, then accumulates
-        contributions from storage (if ``dt is not None``), recharge, and all head
-        boundaries. A ``dt`` of None encodes steady-state behaviour: no storage
-        term is added.
+        contributions from storage (if ``dt is not None``), recharge, and all
+        head boundaries. A ``dt`` of None encodes steady-state behaviour: no
+        storage term is added. Finally, writes the diagonal into the matrix, so
+        that ``residual`` and ``linear_solve`` both see a consistent system.
+        The matrix is mutated in place, which is what lets the linear solver
+        hold a reference to it across calls.
 
         Parameters
         ----------
-        recharge:
-            Whether to include the recharge boundary condition.
         dt:
             Time step size. Set to None for steady state.
+        recharge:
+            Whether to include the recharge boundary condition. The inverse
+            problem excludes it, since recharge is a free variable there.
         """
+        if dt is not None and dt <= 0.0:
+            raise ValueError(f"dt must be positive, got: {dt}")
+
         # Reset
         self.rhs[:] = 0.0
         self.hcof[:] = self.D[:]
@@ -578,106 +710,33 @@ class GroundwaterModel:
 
         # Accumulate boundary conditions
         if recharge:
-            self.recharge.formulate(rhs, self.area)
+            self.recharge.formulate(hcof, rhs, head)
         for boundary in self.head_boundaries:
             boundary.formulate(hcof, rhs, head)
+
+        self.A.data[self._diag_indices] = self.hcof
         return
 
-    def direct_linear_solve(self):
+    def linear_solve(self) -> tuple[bool, int]:
         """
-        Solve the linear system directly using PARDISO.
+        Solve the currently assembled linear system.
 
-        Updates ``_head`` in-place. Prefer this over ``linear_solve`` for
-        problems where the iterative PCG solver struggles to converge, at the
-        cost of higher memory usage.
-        """
-        self.A.setdiag(self.hcof)
-        self._head[:] = pypardiso.spsolve(self.A, self.rhs)
-        return
-
-    def linear_solve(self, warn=True):
-        """
-        Solve the linear system iteratively using preconditioned conjugate gradients.
-
-        Updates ``_head`` in-place via the PCG solver with ILU0 preconditioning.
-
-        Parameters
-        ----------
-        warn:
-            Whether to emit a warning if the solver does not converge.
+        Updates ``_head`` in-place. The matrix diagonal is set by
+        :meth:`formulate`, which the nonlinear iteration calls beforehand.
+        Factorization happens here rather than in ``formulate`` because the
+        nonlinear loop assembles one system more than it solves: the final
+        formulation is only used to evaluate the residual.
 
         Returns
         -------
         converged: bool
-            Whether the solver met the convergence criterion.
+            Whether the solver met the convergence criterion. Direct backends
+            always report True.
         iterations: int
             Number of iterations taken.
         """
-        self.A.setdiag(self.hcof)
-        converged, iterations = self.linearsolver.solve()
-        if warn and not converged:
-            warnings.warn(
-                f"Groundwater linear solver did not converge after {iterations} iterations."
-            )
-        return converged, iterations
-
-    def nonlinear_solve(self, dt=None):
-        """
-        Solve the nonlinear system using Picard iteration.
-
-        Repeatedly calls ``formulate`` and ``linear_solve`` until the
-        infinity-norm of the head update falls below ``xclose``, or
-        ``maxiter`` iterations are reached.
-
-        Parameters
-        ----------
-        dt:
-            Time step size. Set to None for steady state.
-
-        Returns
-        -------
-        converged: bool
-            Whether the solver met the convergence criterion.
-        iterations: int
-            Number of iterations taken.
-        """
-        # Initial formulation defines the fixed residual scaling.
-        self.formulate(dt=dt)
-        np.abs(self.hcof, out=self._rclose)
-        self._rclose *= self.xclose
-
-        maxdh = np.inf
-        maxr = np.inf
-        for i in range(self.maxiter):
-            np.copyto(dst=self._head_iter, src=self._head)
-            converged_linear, _ = self.linear_solve(warn=False)
-            np.subtract(self._head, self._head_iter, out=self._update)
-            maxdh = np.linalg.norm(self._update, ord=np.inf)
-
-            if self.relax != 1.0:
-                self._update *= self.relax
-                np.add(self._head_iter, self._update, out=self._head)
-
-            # Evaluate at current head
-            self.formulate(dt=dt)
-
-            # Normalize residuals in-place:
-            residual = self.residual
-            np.abs(residual, out=residual)
-            np.divide(residual, self._rclose, out=residual)
-            maxr = residual.max()
-
-            # Check nonlinear convergence
-            print(maxdh, maxr)
-            if (maxdh < self.xclose) and (maxr < 1.0):
-                return True, i + 1
-
-        warnings.warn(
-            f"Nonlinear solver did not converge after {self.maxiter} iterations. "
-            f"Final update: {maxdh:.2e}; "
-            f"maximum normalized residual: {maxr:.2e}"
-        )
-        return False, self.maxiter
+        self.linearsolver.factorize()
+        return self.linearsolver.solve()
 
     def bind_time(self, time) -> None:
         self.recharge.bind_time(time)
@@ -686,11 +745,29 @@ class GroundwaterModel:
         return
 
     def advance(self, time_index: int) -> None:
+        """Roll the head forward and move every boundary to the next step."""
         np.copyto(dst=self._head_old, src=self._head)
         self.recharge.advance(time_index)
         for boundary in self.head_boundaries:
             boundary.advance(time_index)
         return
+
+    @staticmethod
+    def _timestep_sizes(time) -> FloatArray:
+        """
+        Convert a time axis into positive step sizes in days.
+
+        Fractional days are preserved: truncating to whole days silently turns
+        sub-daily steps into zeros, which then divide by zero in the storage
+        term.
+        """
+        stamps = np.asarray(time, dtype="datetime64[s]")
+        dts = np.diff(stamps).astype("timedelta64[s]").astype(float) / 86400.0
+        if dts.size == 0:
+            raise ValueError("time must contain at least two stamps.")
+        if not (dts > 0.0).all():
+            raise ValueError("time must be strictly increasing.")
+        return dts
 
     def run(
         self,
@@ -699,23 +776,28 @@ class GroundwaterModel:
         steady_state: bool | BoolArray = True,
     ) -> xr.Dataset:
         """
-        Run a transient or batched simulation over a sequence of time steps.
+        Run a simulation over a sequence of time steps.
 
         Resets the head to the initial condition, then advances the solution
-        through each time step in ``dts`` using nonlinear Picard iteration.
-        Before each step, the optional ``callback`` is invoked, allowing
-        time-varying model state — recharge rates, boundary conditions, etc.,
-        to be updated in-place.
+        through each interval of ``time`` using the nonlinear iteration.
 
         Parameters
         ----------
-        dts:
-            Sequence of time step sizes (same units as storativity).
-        callback:
-            Optional callable with signature ``callback(model, i, dt)``,
-            where ``model`` is the ``GroundwaterModel`` instance, ``i`` is
-            the zero-based step index, and ``dt`` is the current time step
-            size. Called at the start of each step, before formulation.
+        time:
+            Time axis. ``n`` stamps define ``n - 1`` steps; results are written
+            against ``time[:-1]``.
+        path:
+            Destination for the zarr store. A temporary directory is used, and
+            cleaned up when the returned dataset is closed, if omitted.
+        steady_state:
+            Whether each step is steady state. A scalar applies to every step;
+            an array must be broadcastable to the number of steps. Steady-state
+            steps drop the storage term.
+
+        Returns
+        -------
+        xr.Dataset
+            Head, convergence flag and iteration count per time step.
         """
         tmp = None
         if path is None:
@@ -723,22 +805,23 @@ class GroundwaterModel:
             path = Path(tmp.name) / "gwf-results.zarr"
 
         nlayer, ny, nx = self.transmissivity.shape
-        dts = time.diff().days[1:]
-        np.broadcast_to(steady_state, len(dts))
+        dts = self._timestep_sizes(time)
+        steady = np.broadcast_to(steady_state, len(dts))
         self.bind_time(time)
         np.copyto(dst=self._head, src=self.initial)
-        self.formulate(dt=None)
+        np.copyto(dst=self._head_old, src=self._head)
 
         with zarr_writer(
-            path=path, time=time, dims=("layer", "y", "x"), coords=self._coords
+            path=path, time=time[:-1], dims=("layer", "y", "x"), coords=self._coords
         ) as group:
             zarr_head = group["head"]
             zarr_converged = group["converged"]
             zarr_iters = group["iterations"]
             for i, dt in enumerate(dts):
                 self.advance(i)
-                np.copyto(dst=self._head_old, src=self._head)
-                zarr_converged[i], zarr_iters[i] = self.nonlinear_solve(dt=dt)
+                result = self.nonlinear_solve(dt=None if steady[i] else dt)
+                zarr_converged[i] = result.converged
+                zarr_iters[i] = result.iterations
                 zarr_head[i] = self._head.reshape((nlayer, ny, nx))
 
         ds = xr.open_zarr(path)
@@ -759,20 +842,3 @@ class GroundwaterModel:
         return xr.DataArray(
             head_3d, dims=("layer", "y", "x"), coords=self._coords, name="head"
         )
-
-    @property
-    def residual(self) -> np.ndarray:
-        """
-        Residual ``b - A @ h`` for the current head and formulation.
-
-        Computed in-place into a work array: the returned array is
-        invalidated by the next access.
-        """
-        A = self.A
-        A.setdiag(self.hcof)
-        # csr_matvec accumulates (y += A @ x), so negate around it rather
-        # than allocating a temporary for A @ x.
-        np.negative(self.rhs, out=self._residual)
-        csr_matvec(*A.shape, A.indptr, A.indices, A.data, self._head, self._residual)
-        np.negative(self._residual, out=self._residual)
-        return self._residual

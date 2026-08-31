@@ -3,6 +3,8 @@ from typing import Optional
 import numpy as np
 from scipy.sparse.linalg import LinearOperator
 
+from respighi.linearsolvers.solvertypes import LinearSolver
+
 
 class CGIterable:
     """
@@ -137,7 +139,7 @@ class CGIterable:
         return current_iteration
 
 
-class PCGSolver:
+class PCGSolver(LinearSolver):
     def __init__(
         self,
         A: LinearOperator,
@@ -175,3 +177,7 @@ class PCGSolver:
                 return True, i + 1
 
         return False, self.maxiter
+
+    def factorize(self) -> None:
+        """No-op for direct linear solver interface."""
+        return

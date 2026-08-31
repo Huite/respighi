@@ -2,37 +2,7 @@ import numpy as np
 from scipy import sparse
 
 from respighi.constants import FloatArray
-from respighi.linearsolvers.pardiso import PardisoWrapper
 from respighi.linearsolvers.solvertypes import DirectSolver, MatrixType
-
-
-class ScipyWrapper(DirectSolver):
-    """
-    Wrapper around scipy.sparse.linalg.splu.
-    Pure-Python fallback, no native dependencies.
-    Slower than Pardiso/MUMPS but useful for testing or unsupported platforms.
-    """
-
-    def __init__(self, A: sparse.csr_matrix, b: FloatArray, x: FloatArray):
-        self.A = A
-        self.b = b
-        self.x = x
-        self._lu = None
-
-    def analyze(self):
-        pass  # scipy combines analysis and factorization in splu
-
-    def factorize(self):
-        self._lu = sparse.linalg.splu(self.A.tocsc())
-
-    def solve(self):
-        self.x[:] = self._lu.solve(self.b)
-
-    def solve_multi(self, B: np.ndarray) -> np.ndarray:
-        return self._lu.solve(B)
-
-    def free_memory(self):
-        self._lu = None
 
 
 class MumpsWrapper(DirectSolver):
@@ -76,6 +46,7 @@ class MumpsWrapper(DirectSolver):
         # mumps solves in-place; copy b into x so the result lands there
         self.x[:] = self.b[:]
         self.mumps.solve(b=self.x, overwrite_b=True)
+        return True, 1
 
     def free_memory(self):
         self.mumps.destroy()
@@ -122,15 +93,3 @@ class MumpsWrapper(DirectSolver):
             (np.ones(n), (indices, indices)), shape=(N, N)
         ).tocsc()
         return self.inverse_entries(self.mumps, pattern)
-
-
-def make_direct_solver(solver_backend: str, A, b, x, matrix_type=None):
-    match solver_backend:
-        case "pardiso":
-            return PardisoWrapper(A, b, x, matrix_type)
-        case "mumps":
-            return MumpsWrapper(A, b, x, matrix_type)
-        case "scipy":
-            return ScipyWrapper(A, b, x)
-        case _:
-            raise ValueError(f"Unknown solver_backend: {solver_backend}")

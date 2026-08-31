@@ -14,6 +14,14 @@ from respighi.layer_reduction import (
     effective_transmissivity,
     two_layer_effective_transmisivity,
 )
+from respighi.linearsolvers.settings import (
+    MumpsSettings,
+    PardisoSettings,
+    PCGSettings,
+    ScipyLUSettings,
+)
+from respighi.nonlinear import NonlinearSettings
+from respighi.relaxation import AitkenRelaxation, ScalarRelaxation
 from respighi.surrogate import LinearInterpolationSurrogate
 from respighi.target import (
     CellSampling,
@@ -46,4 +54,11 @@ __all__ = (
     "InverseProblemMINRES",
     "effective_transmissivity",
     "two_layer_effective_transmisivity",
+    "NonlinearSettings",
+    "ScalarRelaxation",
+    "AitkenRelaxation",
+    "PCGSettings",
+    "PardisoSettings",
+    "MumpsSettings",
+    "ScipyLUSettings",
 )

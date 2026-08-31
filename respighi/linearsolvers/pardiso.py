@@ -346,7 +346,7 @@ class PardisoWrapper(DirectSolver):
         if not self._factorized:
             raise RuntimeError("call factorize() before solve()")
         self._call(Phase.SOLVE)
-        return self.x
+        return True, 1
 
     def solve_multi(self, B: np.ndarray) -> np.ndarray:
         """
