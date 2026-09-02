@@ -275,7 +275,7 @@ class GridSampling(FittingTarget):
     """
     Sample head values directly from corresponding grid cells.
 
-    Only cells finite at every timestamp are included: the observation
+    Only cells with not-NA values at every timestamp are included: the observation
     network is fixed for the run, so a cell that drops out partway would
     change the shape of ``P``.
     """
@@ -293,7 +293,7 @@ class GridSampling(FittingTarget):
         nhead = self._row_index.size
         if nhead == 0:
             raise ValueError("Full NoData at every timestamp.")
-        if not np.array_equal(mask, notnull.any()):
+        if not np.array_equal(mask, notnull.any("time")):
             raise ValueError(
                 "The set of NoData cells varies in time, but P is fixed. "
                 "Drop intermittent cells or split the run into segments."
