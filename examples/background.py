@@ -289,9 +289,10 @@ fig.suptitle("Forward solution ('truth')")
 # observed cells from the full head vector.
 
 observed_indices = np.array([5, 15, 25, 35, 45])
-target_head = np.full(ncell, np.nan)
-target_head[observed_indices] = gwf._head[observed_indices]
-target = rsp.GridSampling(target_head)
+target_head = np.full((1, ncell), np.nan)
+target_head[0, observed_indices] = gwf._head[observed_indices]
+target = rsp.GridSampling(head=target_head)
+
 
 # %%
 # Effect of observation density
@@ -315,8 +316,8 @@ fig, axes = plt.subplots(
 
 original_head = gwf._head.copy()
 for col, (label, obs_idx) in enumerate(observation_sets.items()):
-    target_head = np.full(ncell, np.nan)
-    target_head[obs_idx] = original_head[obs_idx]
+    target_head = np.full((1, ncell), np.nan)
+    target_head[0, obs_idx] = original_head[obs_idx]
     target = rsp.GridSampling(target_head)
 
     inverse = rsp.InverseProblem(
@@ -358,8 +359,8 @@ fig.tight_layout()
 # solution away from a pure data fit.
 
 obs_idx = np.array([5, 15, 25, 35, 45])
-target_head = np.full(ncell, np.nan)
-target_head[obs_idx] = gwf._head[obs_idx]
+target_head = np.full((1, ncell), np.nan)
+target_head[0, obs_idx] = gwf._head[obs_idx]
 target = rsp.GridSampling(target_head)
 
 inverse = rsp.InverseProblem(

@@ -98,6 +98,8 @@ class InverseProblem(NonlinearIteration):
                 self.linear_settings = MumpsSettings()
             else:
                 self.linear_settings = PardisoSettings()
+        else:
+            self.linear_settings = linear_settings
 
         if symmetric is None:
             # PARDISO is not very reliable with the symmetric form.

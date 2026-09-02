@@ -169,12 +169,7 @@ class NonlinearIteration(abc.ABC):
                 return SolverResult(True, i, max_update, max_residual)
 
             np.copyto(dst=previous, src=state)
-            linear_converged, linear_iterations = self.linear_solve()
-            if not linear_converged:
-                warnings.warn(
-                    f"Linear solver did not converge after {linear_iterations} "
-                    f"iterations, in nonlinear iteration {i + 1}."
-                )
+            self.linear_solve()
 
             np.subtract(state, previous, out=update)
             primary_update = self.primary(update)

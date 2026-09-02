@@ -27,8 +27,6 @@ XMAX = 205_000.0
 YMIN = 350_000.0
 YMAX = 370_000.0
 PIEZOMETER_SIGMA = 0.1
-BOUNDARY_SIGMA = 0.2
-
 
 def slice_dataset(ds):
     return ds.sel(x=slice(XMIN, XMAX), y=slice(YMAX, YMIN))
@@ -117,8 +115,7 @@ x = piezometers.geometry.x.to_numpy()
 y = piezometers.geometry.y.to_numpy()
 grid = xu.Ugrid2d.from_structured(modelhead)
 head = piezometers["mean_head"].to_numpy()
-sigma = np.full_like(head, PIEZOMETER_SIGMA)
-target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=sigma)
+target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=PIEZOMETER_SIGMA)
 
 # %%
 # With the groundwater model and the target, we can pose an inverse problem to solve.
@@ -126,7 +123,7 @@ target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=sigma)
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
-    regularization=rsp.UnscaledMinimumCurvature(10.0),
+    regularization=rsp.UnscaledMinimumCurvature(1000.0),
 )
 inverse.formulate()
 inverse.nonlinear_solve()
@@ -152,11 +149,9 @@ ax.set_aspect(1.0)
 # --------------------
 #
 # We will also make an attempt to estimate the uncertainty given
-# the a priori provided estimates (0.1 for piezometers, 0.2 for boundary conditions):
+# the a priori provided estimates (0.1 for piezometers):
 
-variance = inverse.estimate_variance(
-    batch_size=64,
-)
+variance = inverse.estimate_variance()
 sigma = np.sqrt(variance).isel(layer=0)
 
 # %%

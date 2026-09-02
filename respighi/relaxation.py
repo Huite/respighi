@@ -176,7 +176,6 @@ class AitkenRelaxation(Relaxation):
             return
         numerator = np.dot(self.previous_update, self.delta)
         alpha_new = -self.alpha * numerator / dd
-        print("alpha", alpha_new)
         if np.isfinite(alpha_new):
             self.alpha = float(np.clip(alpha_new, self.alpha_min, self.alpha_max))
 
