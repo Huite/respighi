@@ -354,6 +354,7 @@ class InverseProblem(NonlinearIteration):
         time,
         path=None,
         steady_state: bool | BoolArray = True,
+        progress: bool = False,
     ) -> xr.Dataset:
         """
         Run an inverse solve over a sequence of time steps.
@@ -372,6 +373,9 @@ class InverseProblem(NonlinearIteration):
         steady_state:
             Whether each step is steady state. A scalar applies to every step;
             an array must be broadcastable to the number of steps.
+        progress:
+            Whether to print the current time step and number of non-linear
+            iterations.
 
         Returns
         -------
@@ -397,6 +401,10 @@ class InverseProblem(NonlinearIteration):
             zarr_recharge = group["recharge"]
             zarr_converged = group["converged"]
             zarr_iterations = group["iterations"]
+
+            if progress:
+                print("Time stepping:")
+
             for i, dt in enumerate(dts):
                 self.advance(i)
                 result = self.nonlinear_solve(dt=None if steady[i] else dt)
@@ -404,6 +412,11 @@ class InverseProblem(NonlinearIteration):
                 zarr_iterations[i] = result.iterations
                 zarr_head[i] = self._head.reshape((nlayer, ny, nx))
                 zarr_recharge[i] = self._recharge.reshape((ny, nx))
+
+                if progress:
+                    print(
+                        f"   - Finished timestep {i + 1}/{dts.size} in {result.iterations} non-linear iterations"
+                    )
 
         ds = xr.open_zarr(path)
         if tmp is not None:

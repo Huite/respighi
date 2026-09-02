@@ -27,7 +27,6 @@ XMAX = 205_000.0
 YMIN = 350_000.0
 YMAX = 370_000.0
 PIEZOMETER_SIGMA = 0.1
-BOUNDARY_SIGMA = 0.2
 
 
 def slice_dataset(ds):
@@ -116,13 +115,12 @@ gwf.head.isel(layer=0).plot.contour(levels=30)
 
 head = xr.open_dataarray("../tmp-scripts/transient-observations.nc")
 grid = xu.Ugrid2d.from_structured(modelhead)
-sigma = np.full(head.shape[1], PIEZOMETER_SIGMA)
 target = rsp.CellSampling(
     x=head["x"],
     y=head["y"],
     head=head,
     grid=grid,
-    sigma=sigma,
+    sigma=PIEZOMETER_SIGMA,
 )
 # %%
 

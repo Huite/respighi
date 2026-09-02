@@ -28,6 +28,7 @@ YMIN = 350_000.0
 YMAX = 370_000.0
 PIEZOMETER_SIGMA = 0.1
 
+
 def slice_dataset(ds):
     return ds.sel(x=slice(XMIN, XMAX), y=slice(YMAX, YMIN))
 
