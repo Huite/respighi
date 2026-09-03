@@ -19,7 +19,7 @@ def slice_dataset(ds):
 
 ibrahym_head = slice_dataset(
     xr.open_dataset("../case/ibrahym/ibrahym-head-l1-100m.nc")["head"]
-)
+).compute()
 
 # %%
 
