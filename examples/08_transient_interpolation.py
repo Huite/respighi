@@ -96,13 +96,30 @@ gwf.nonlinear_solve()
 gwf.head.isel(layer=0).plot.contour(levels=30)
 
 # %%
-# Read transient results. Let's plot the locations on the map, and look at a few
-# time series.
+# Create some "synthetic piezometers from the transient IBRAHYM results.
 
-head_timeseries = xr.open_dataarray("synthetic_piezometers-100.nc")
+def make_piezometers(n_piezometers, xmin, xmax, ymin, ymax):
+    rng = np.random.default_rng(seed=12345)
+    x = xmin + (xmax - xmin) * rng.random(n_piezometers)
+    y = ymin + (ymax - ymin) * rng.random(n_piezometers)
+    return x, y
+
+x, y = make_piezometers(
+    n_piezometers=100,
+    xmin=XMIN,
+    xmax=XMAX,
+    ymin=YMIN,
+    ymax=YMAX,
+)
+
+head_timeseries = ibrahym_head.sel(
+    x=xr.DataArray(x, dims=["observation"]),
+    y=xr.DataArray(y, dims=["observation"]),
+    method="nearest",
+).compute()
 
 # %%
-# On the map:
+# Let's plot the locations on the map, and look at a few time series.
 
 fig, ax = plt.subplots()
 gwf.head.isel(layer=0).plot.contour(levels=30, ax=ax)
