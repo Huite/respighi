@@ -120,7 +120,7 @@ class AitkenRelaxation(Relaxation):
     Parameters
     ----------
     n: int
-        Length of the vector passed to :meth:`set_alpha` — the estimation
+        Length of the vector passed to :meth:`set_alpha`, the estimation
         block, which for a blocked system is smaller than the full state.
     alpha_min: float
         Lower clip on the factor. Must be positive, so a bad estimate stalls
