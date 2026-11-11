@@ -189,7 +189,6 @@ inverse = rsp.InverseProblem(
     groundwatermodel=gwf,
     target=target,
     regularization=rsp.UnscaledMinimumCurvature(1.0),
-    maxiter=100,
     explicit_residuals=True,
 )
 inverse.formulate()
