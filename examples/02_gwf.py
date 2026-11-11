@@ -159,3 +159,24 @@ fig, ax = plt.subplots()
 ax.set_aspect(1.0)
 
 # %%
+# Respighi also supports inactive areas (IDOMAIN=0 in MODFLOW 6). These are
+# marked by a NaN NoData value in the transmissivity. Inactive areas in the
+# resulting head are also marked by a NaN value.
+
+new_transmissivity = transmissivity.copy()
+new_transmissivity.data[..., 50:150, 300:400] = np.nan
+
+new_gwf = rsp.GroundwaterModel(
+    area=25.0 * 25.0,
+    initial=xr.full_like(transmissivity, 0.0),
+    recharge=recharge,
+    head_boundaries=[river, ditch, tube, overlandflow],
+    transmissivity=new_transmissivity,
+    storativity=xr.full_like(transmissivity, 0.15),
+)
+new_gwf.nonlinear_solve()
+
+
+fig, ax = plt.subplots()
+new_gwf.head.plot(levels=30, ax=ax)
+ax.set_aspect(1.0)

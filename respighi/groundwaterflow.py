@@ -235,6 +235,18 @@ class Drainage(Boundary):
             smoothing_width=smoothing_width,
         )
 
+    def flux(self, head):
+        """
+        Drain flux Q(h) = C * t * (h - elevation) + C * offset,
+        i.e. the exact function whose tangent line (in h) gives the
+        hcof/rhs pair used in `formulate`.
+        """
+        x = head - self.elevation  # signed distance, kept for the final product
+        weight = x.copy()
+        offset = np.empty_like(weight)
+        _smoothstep_inplace(weight, self.smoothing_width, offset)  # weight -> t
+        return self.conductance * (weight * x + offset)
+
 
 class River(Boundary):
     """
@@ -505,12 +517,6 @@ class GroundwaterModel(NonlinearIteration):
         self.horizontal_flow_barriers = horizontal_flow_barriers
         self.area = area
         self.n = n
-        self.rhs = np.zeros(n)
-        self._head = self.initial.astype(float, copy=True)
-        # Work arrays
-        self._head_old = self._head.astype(float, copy=True)
-        self._storage_work = np.empty_like(self.storativity, dtype=float)
-        self._residual = np.empty_like(self._head, dtype=float)
 
         # Boundaries that scale with cell area need it before first formulation.
         self.recharge.bind_grid(area)
@@ -518,15 +524,25 @@ class GroundwaterModel(NonlinearIteration):
             boundary.bind_grid(area)
 
         # Matrix assembly
-        self.W = self._build_conductance(
+        self.W, self.active = self._build_conductance(
             transmissivity_3d,
             resistance_3d,
             area,
             horizontal_flow_barriers,
         )
+        self.inactive = ~self.active
+        self.initial[self.inactive] = 0.0
+
+        # Work arrays
+        self.rhs = np.zeros(n)
+        self._head = self.initial.astype(float, copy=True)
+        self._head_old = self._head.astype(float, copy=True)
+        self._storage_work = np.empty_like(self.storativity, dtype=float)
+        self._residual = np.empty_like(self._head, dtype=float)
 
         # Compute the (weighted) degree matrix
         self.D = np.asarray(self.W.sum(axis=1)).ravel()
+        self.D[self.inactive] = 1.0
         self.hcof = self.D.copy()
         # Compute the Laplacian. Force explicit storage of the diagonal, since
         # cells with a zero degree would otherwise leave a structural hole that
@@ -663,10 +679,17 @@ class GroundwaterModel(NonlinearIteration):
             columns.extend(ji)
             data.extend(C_delta)
 
-        return sparse.coo_matrix(
-            (np.concatenate(data), (np.concatenate(rows), np.concatenate(columns))),
+        rows = np.concatenate(rows)
+        columns = np.concatenate(columns)
+        data = np.concatenate(data)
+
+        active = np.isfinite(transmissivity.ravel())
+        valid = active[rows] & active[columns] & np.isfinite(data)
+        connectivity = sparse.coo_matrix(
+            (data[valid], (rows[valid], columns[valid])),
             shape=(size, size),
         ).tocsr()
+        return connectivity, active
 
     def formulate(self, dt=None, recharge=True):
         """
@@ -713,6 +736,10 @@ class GroundwaterModel(NonlinearIteration):
             self.recharge.formulate(hcof, rhs, head)
         for boundary in self.head_boundaries:
             boundary.formulate(hcof, rhs, head)
+
+        # Modify inactive cells.
+        self.hcof[self.inactive] = 1.0
+        self.rhs[self.inactive] = 0.0
 
         self.A.data[self._diag_indices] = self.hcof
         return
@@ -838,7 +865,11 @@ class GroundwaterModel(NonlinearIteration):
         provided at construction, otherwise synthesised from cell size and
         grid dimensions.
         """
-        head_3d = self._head.reshape(self.transmissivity.shape)
+        head_3d = np.where(
+            self.active,
+            self._head,
+            np.nan,
+        ).reshape(self.transmissivity.shape)
         return xr.DataArray(
             head_3d, dims=("layer", "y", "x"), coords=self._coords, name="head"
         )
