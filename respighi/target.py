@@ -136,7 +136,7 @@ class FittingTarget(abc.ABC):
 
     @property
     def n_targets(self) -> int:
-        return self.P.shape[0]
+        return self.d.size
 
     @property
     def observed(self) -> FloatArray:
