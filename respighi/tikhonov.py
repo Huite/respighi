@@ -5,16 +5,37 @@ from scipy import sparse
 from scipy.special import k1
 
 from respighi.groundwaterflow import GroundwaterModel
+from respighi.constants import BoolArray
 
 
-def graph_laplacian(ny: int, nx: int) -> sparse.csr_matrix:
+def graph_laplacian(ny: int, nx: int, active: BoolArray) -> sparse.csr_matrix:
+    if active.size != (ny * nx):
+        raise ValueError("Active mask size does not match grid.")
+
     layer_n = ny * nx
     i, j = GroundwaterModel.build_connectivity((ny, nx))
+    valid = active[i] & active[j]
+    i, j = i[valid], j[valid]
     W_2d = sparse.coo_matrix(
-        (np.ones(len(i)), (i, j)), shape=(layer_n, layer_n)
+        (np.ones(len(i)), (i, j)),
+        shape=(layer_n, layer_n),
     ).tocsr()
     D_2d = np.asarray(W_2d.sum(axis=1)).ravel()  # Degree matrix
     return sparse.diags(D_2d) - W_2d
+
+
+def constrain_inactive(L, active: BoolArray):
+    """
+    Set the diagonal of the inactive cells to 1, such that they remain
+    constrained.
+
+    The inactive cells are discarded based on the activity pattern in
+    graph_laplacian(); as such they would be unconstrained and the resulting
+    system would be singular. Here we set a (dummy) value of 1.0, such that they
+    simply assume the rhs value.
+    """
+    I_inactive = sparse.diags((~active).astype(float))
+    return L + I_inactive
 
 
 class MaternSemivariogram(NamedTuple):
@@ -65,11 +86,14 @@ class MaternSemivariogram(NamedTuple):
         ax.legend()
         return ax
 
-    def build_tikhonov_operator(self, ny: int, nx: int, dx: float) -> sparse.csr_matrix:
-        L = graph_laplacian(ny, nx)
-        _I = sparse.eye(L.shape[0], format="csr")
+    def build_tikhonov_operator(self, ny: int, nx: int, dx: float, active: BoolArray) -> sparse.csr_matrix:
+        L = graph_laplacian(ny, nx, active)
+        _I = sparse.diags(
+            np.asarray(active, dtype=float).ravel()
+        )
         kappa_grid = self.kappa * dx
-        return (self.tau / dx) * (kappa_grid**2 * _I + L)
+        T = (self.tau / dx) * (kappa_grid**2 * _I + L)
+        return constrain_inactive(T, active)
 
 
 class UnscaledMinimumCurvature(NamedTuple):
@@ -77,9 +101,9 @@ class UnscaledMinimumCurvature(NamedTuple):
 
     weight: float
 
-    def build_tikhonov_operator(self, ny: int, nx: int, dx: float) -> sparse.csr_matrix:
-        L = graph_laplacian(ny, nx)
-        return self.weight * L
+    def build_tikhonov_operator(self, ny: int, nx: int, dx: float, active: BoolArray) -> sparse.csr_matrix:
+        L = self.weight * graph_laplacian(ny, nx, active)
+        return constrain_inactive(L, active)
 
 
 class MinimumCurvature(NamedTuple):
@@ -90,9 +114,10 @@ class MinimumCurvature(NamedTuple):
         ny: int,
         nx: int,
         dx: float,
+        active: BoolArray,
     ) -> sparse.csr_matrix:
-        L = graph_laplacian(ny, nx)
-        return L / (self.roughness_scale * dx)
+        L = graph_laplacian(ny, nx, active) / (self.roughness_scale * dx)
+        return constrain_inactive(L, active)
 
     @classmethod
     def from_sinusoid(

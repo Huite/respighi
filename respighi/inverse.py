@@ -115,6 +115,8 @@ class InverseProblem(NonlinearIteration):
         self.n = self.gwf.n
         self.layer_n = self.gwf.layer_n
         self.regularization = regularization
+        self.active = groundwatermodel.active
+        self.active_first_layer = self.active[:self.layer_n]
 
         self.K, self.Pt, self.matrix_type = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
@@ -183,13 +185,17 @@ class InverseProblem(NonlinearIteration):
         # Assumes constant cell sizes, and dx == dy.
         ny, nx = self.gwf.transmissivity.shape[1:]
         L = regularization.build_tikhonov_operator(
-            ny=ny, nx=nx, dx=np.sqrt(self.gwf.area)
+            ny=ny, nx=nx, dx=np.sqrt(self.gwf.area), active=self.active_first_layer,
         )
 
-        rows = np.arange(self.layer_n)
-        area = np.full(self.layer_n, self.gwf.area)
+        # Cell area: maps recharge to groundwater flow equations
+        rows = np.flatnonzero(self.active_first_layer)
         Q = sparse.coo_matrix(
-            (area, (rows, rows)), shape=(self.n, self.layer_n)
+            (
+                np.full(rows.size, self.gwf.area),
+                (rows, rows),
+            ),
+            shape=(self.n, self.layer_n),
         ).tocsr()
 
         Z_n = sparse.csr_array((self.n, self.n))
@@ -441,8 +447,13 @@ class InverseProblem(NonlinearIteration):
     @property
     def head(self):
         """Head estimate as a labelled DataArray of shape ``(layer, y, x)``."""
+        head3d = np.where(
+            self.active,
+            self._head,
+            np.nan,
+        ).reshape(self.gwf.transmissivity.shape)
         return xr.DataArray(
-            data=self._head.reshape(self.gwf.transmissivity.shape),
+            data=head3d,
             dims=("layer", "y", "x"),
             coords=self.gwf._coords,
             name="head",
@@ -451,8 +462,13 @@ class InverseProblem(NonlinearIteration):
     @property
     def recharge(self):
         """Recharge estimate as a labelled DataArray of shape ``(y, x)``."""
+        recharge2d = np.where(
+            self.active_first_layer,
+            self._recharge,
+            np.nan,
+        ).reshape(self.gwf.transmissivity.shape[1:])
         return xr.DataArray(
-            data=self._recharge.reshape(self.gwf.transmissivity.shape[1:]),
+            data=recharge2d,
             dims=("y", "x"),
             coords={"y": self.gwf._coords["y"], "x": self.gwf._coords["x"]},
             name="recharge",
@@ -461,8 +477,13 @@ class InverseProblem(NonlinearIteration):
     @property
     def lagrangian(self):
         """Lagrange multipliers as a labelled DataArray of shape ``(layer, y, x)``."""
+        lagrangian3d = np.where(
+            self.active,
+            self._lagrangian,
+            np.nan,
+        ).reshape(self.gwf.transmissivity.shape)
         return xr.DataArray(
-            self._lagrangian.reshape(self.gwf.transmissivity.shape),
+            data=lagrangian3d,
             dims=("layer", "y", "x"),
             coords=self.gwf._coords,
             name="lagrangian",
@@ -584,8 +605,13 @@ class InverseProblem(NonlinearIteration):
             linearsolver.factorize()
 
         variance = linearsolver.inverse_diagonal(indices=np.arange(self.n))
+        variance3d = np.where(
+            self.active,
+            variance,
+            np.nan,
+        ).reshape(self.gwf.transmissivity.shape)
         return xr.DataArray(
-            data=variance.reshape(self.gwf.transmissivity.shape),
+            data=variance3d,
             dims=("layer", "y", "x"),
             coords=self.gwf._coords,
             name="variance",
