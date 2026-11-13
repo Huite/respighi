@@ -4,8 +4,8 @@ import numpy as np
 from scipy import sparse
 from scipy.special import k1
 
-from respighi.groundwaterflow import GroundwaterModel
 from respighi.constants import BoolArray
+from respighi.groundwaterflow import GroundwaterModel
 
 
 def graph_laplacian(ny: int, nx: int, active: BoolArray) -> sparse.csr_matrix:
@@ -86,11 +86,11 @@ class MaternSemivariogram(NamedTuple):
         ax.legend()
         return ax
 
-    def build_tikhonov_operator(self, ny: int, nx: int, dx: float, active: BoolArray) -> sparse.csr_matrix:
+    def build_tikhonov_operator(
+        self, ny: int, nx: int, dx: float, active: BoolArray
+    ) -> sparse.csr_matrix:
         L = graph_laplacian(ny, nx, active)
-        _I = sparse.diags(
-            np.asarray(active, dtype=float).ravel()
-        )
+        _I = sparse.diags(np.asarray(active, dtype=float).ravel())
         kappa_grid = self.kappa * dx
         T = (self.tau / dx) * (kappa_grid**2 * _I + L)
         return constrain_inactive(T, active)
@@ -101,7 +101,9 @@ class UnscaledMinimumCurvature(NamedTuple):
 
     weight: float
 
-    def build_tikhonov_operator(self, ny: int, nx: int, dx: float, active: BoolArray) -> sparse.csr_matrix:
+    def build_tikhonov_operator(
+        self, ny: int, nx: int, dx: float, active: BoolArray
+    ) -> sparse.csr_matrix:
         L = self.weight * graph_laplacian(ny, nx, active)
         return constrain_inactive(L, active)
 
