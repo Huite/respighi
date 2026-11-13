@@ -94,7 +94,7 @@ class InverseProblem(NonlinearIteration):
         # The sparsity structure is static, so symbolic analysis happens once,
         # inside build. Numeric factorization is deferred to linear_solve.
         if linear_settings is None:
-            if platform.system == "Darwin":
+            if platform.system() == "Darwin":
                 self.linear_settings = MumpsSettings()
             else:
                 self.linear_settings = PardisoSettings()
@@ -116,16 +116,21 @@ class InverseProblem(NonlinearIteration):
         self.layer_n = self.gwf.layer_n
         self.regularization = regularization
         self.active = groundwatermodel.active
-        self.active_first_layer = self.active[:self.layer_n]
+        self.active_first_layer = self.active[: self.layer_n]
 
         self.K, self.Pt, self.matrix_type = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
         self.x = np.zeros_like(self.rhs, dtype=float)
         self._flow_residual = np.empty(self.n, dtype=float)
 
-        # Extract diagonal indices for efficient updates
+        # Extract diagonal indices for efficient updates and overwrite the
+        # sentinel.
         self._A_diag_indices = self._extract_diagonal_indices()
         self.K.data[self._A_diag_indices] = self.gwf.hcof
+
+        # Extract indices to observation indices and overwrite the sentinel.
+        self._obs_indices = self._create_observation_mapping()
+        self._update_observation_weights()
 
         if explicit_residuals:
             obs_start = self.n + self.layer_n
@@ -185,7 +190,10 @@ class InverseProblem(NonlinearIteration):
         # Assumes constant cell sizes, and dx == dy.
         ny, nx = self.gwf.transmissivity.shape[1:]
         L = regularization.build_tikhonov_operator(
-            ny=ny, nx=nx, dx=np.sqrt(self.gwf.area), active=self.active_first_layer,
+            ny=ny,
+            nx=nx,
+            dx=np.sqrt(self.gwf.area),
+            active=self.active_first_layer,
         )
 
         # Cell area: maps recharge to groundwater flow equations
@@ -204,18 +212,22 @@ class InverseProblem(NonlinearIteration):
             Z_layer = sparse.csr_array((self.layer_n, self.layer_n))
             I_e = sparse.eye_array(n_obs, format="csr")
             I_s = sparse.eye_array(self.layer_n, format="csr")
+            Pt_nan = Pt.copy()
+            Pt_nan.data[:] = np.nan
             blocks = [
                 # Zero diagonal blocks are needed: without them block_array
                 # cannot infer the h and r block-column widths.
-                [Z_n, None, Pt, None, A.T],
+                [Z_n, None, Pt_nan, None, A.T],
                 [None, Z_layer, None, L.T, -Q.T],
                 [None, None, -I_e, None, None],
                 [None, None, None, -I_s, None],
                 [None, None, None, None, Z_n],
             ]
         else:
+            PtP = (Pt @ P).tocsr()
+            PtP.data[:] = np.nan
             blocks = [
-                [Pt @ P, None, A.T],
+                [PtP, None, A.T],
                 [None, L.T @ L, -Q.T],
                 [None, None, Z_n],
             ]
@@ -290,6 +302,50 @@ class InverseProblem(NonlinearIteration):
             )
         return indices.reshape(-1, self.n)
 
+    def _create_observation_mapping(self):
+        """
+        Extract and store the CSR data indices of the observation entries for
+        efficient updates.
+
+        During ``_build_matrix``, the observation block (P^T P in the normal
+        form; P^T, and P if both halves are stored, in the explicit form) is
+        filled with ``NaN`` sentinels. This method locates those entries.
+
+        We require the matrix indices rather than direct mapping unto .data:
+        when a target entry is invalid, its weight is set to zero, and this
+        may change the sparsity pattern of P^T P; indexing via (row, column)
+        guarantees that non-structural zeroes are returned too.
+        """
+        indices = np.flatnonzero(np.isnan(self.K.data))
+        krow = np.repeat(np.arange(self.K.shape[0]), np.diff(self.K.indptr))[indices]
+        kcol = self.K.indices[indices]
+        if self.explicit_residuals:
+            offset = self.n + self.layer_n
+            upper = krow < self.n
+            lower = ~upper
+            obs_indices = (
+                (indices[upper], krow[upper], kcol[upper] - offset),  # P^T block
+                (
+                    indices[lower],
+                    krow[lower] - offset,
+                    kcol[lower],
+                ),  # P block (nonsymmetric only)
+            )
+        else:
+            obs_indices = ((indices, krow, kcol),)  # P^T P block
+        return obs_indices
+
+    def _update_observation_weights(self) -> None:
+        Pm = self.target.P.multiply(self.target.valid[:, None]).tocsr()
+        if self.explicit_residuals:
+            blocks = (Pm.T.tocsr(), Pm)
+        else:
+            blocks = ((Pm.T @ Pm).tocsr(),)
+        for block, (indices, rows, columns) in zip(blocks, self._obs_indices):
+            if indices.size:
+                self.K.data[indices] = np.asarray(block[rows, columns]).ravel()
+        return
+
     @property
     def state(self) -> FloatArray:
         """Full solution vector, written in place by the linear solver."""
@@ -349,6 +405,9 @@ class InverseProblem(NonlinearIteration):
         np.copyto(dst=self.gwf._head, src=self._head)
         self.gwf.advance(time_index)
         self.target.advance(time_index)
+        if not self.target.valid.any():
+            raise ValueError(f"No valid observations at time step {time_index}.")
+        self._update_observation_weights()
         # Now copy over the observations from the target to the rhs.
         if self.explicit_residuals:
             self.rhs[self.rhs_obs_slice] = self.target.d
@@ -416,8 +475,8 @@ class InverseProblem(NonlinearIteration):
                 result = self.nonlinear_solve(dt=None if steady[i] else dt)
                 zarr_converged[i] = result.converged
                 zarr_iterations[i] = result.iterations
-                zarr_head[i] = self._head.reshape((nlayer, ny, nx))
-                zarr_recharge[i] = self._recharge.reshape((ny, nx))
+                zarr_head[i] = self._head3d
+                zarr_recharge[i] = self._recharge2d
 
                 if progress:
                     print(
@@ -435,9 +494,25 @@ class InverseProblem(NonlinearIteration):
         return self.x[: self.n]
 
     @property
+    def _head3d(self):
+        return np.where(
+            self.active,
+            self._head,
+            np.nan,
+        ).reshape(self.gwf.transmissivity.shape)
+
+    @property
     def _recharge(self):
         """Current recharge estimate; entries ``n`` to ``n + layer_n`` of the solution vector."""
         return self.x[self.n : self.n + self.layer_n]
+
+    @property
+    def _recharge2d(self):
+        return np.where(
+            self.active_first_layer,
+            self._recharge,
+            np.nan,
+        ).reshape(self.gwf.transmissivity.shape[1:])
 
     @property
     def _lagrangian(self):
@@ -445,15 +520,18 @@ class InverseProblem(NonlinearIteration):
         return self.x[-self.n :]
 
     @property
-    def head(self):
-        """Head estimate as a labelled DataArray of shape ``(layer, y, x)``."""
-        head3d = np.where(
+    def _langrangian3d(self):
+        return np.where(
             self.active,
-            self._head,
+            self._lagrangian,
             np.nan,
         ).reshape(self.gwf.transmissivity.shape)
+
+    @property
+    def head(self):
+        """Head estimate as a labelled DataArray of shape ``(layer, y, x)``."""
         return xr.DataArray(
-            data=head3d,
+            data=self._head3d,
             dims=("layer", "y", "x"),
             coords=self.gwf._coords,
             name="head",
@@ -462,13 +540,8 @@ class InverseProblem(NonlinearIteration):
     @property
     def recharge(self):
         """Recharge estimate as a labelled DataArray of shape ``(y, x)``."""
-        recharge2d = np.where(
-            self.active_first_layer,
-            self._recharge,
-            np.nan,
-        ).reshape(self.gwf.transmissivity.shape[1:])
         return xr.DataArray(
-            data=recharge2d,
+            data=self._recharge2d,
             dims=("y", "x"),
             coords={"y": self.gwf._coords["y"], "x": self.gwf._coords["x"]},
             name="recharge",
@@ -477,13 +550,8 @@ class InverseProblem(NonlinearIteration):
     @property
     def lagrangian(self):
         """Lagrange multipliers as a labelled DataArray of shape ``(layer, y, x)``."""
-        lagrangian3d = np.where(
-            self.active,
-            self._lagrangian,
-            np.nan,
-        ).reshape(self.gwf.transmissivity.shape)
         return xr.DataArray(
-            data=lagrangian3d,
+            data=self._lagrangian3d,
             dims=("layer", "y", "x"),
             coords=self.gwf._coords,
             name="lagrangian",
@@ -532,7 +600,7 @@ class InverseProblem(NonlinearIteration):
         N = len(self.rhs)
         B = np.zeros((N, n_obs), dtype=float)
         # The observation-dependent part of the KKT RHS is P.T @ d.
-        B[: self.n, :] = self.Pt.toarray()
+        B[: self.n, :] = self.Pt.toarray() * self.target.valid
         X = self.linearsolver.solve_multi(B)
         # The first block of the KKT solution is h.
         return X[: self.n, :]

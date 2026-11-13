@@ -8,6 +8,7 @@ from numpy.typing import NDArray
 from scipy import sparse
 
 FloatArray = NDArray[np.floating]
+BoolArray = NDArray[np.bool_]
 
 # Placeholder coordinate for a static (non time-varying) source. Its value is
 # never used for lookup: bind_time short-circuits a length-1 time axis, so no
@@ -100,9 +101,7 @@ class FittingTarget(abc.ABC):
     ``head`` is always stored as a DataArray with a leading ``time`` axis; a
     static source is simply one with a single timestamp. ``bind_time`` maps a
     simulation time axis onto the source's own timestamps, and ``advance``
-    refreshes ``d`` when the mapped position changes. The observation operator
-    ``P`` is fixed for the lifetime of the target: the set of observations may
-    not vary between time steps.
+    refreshes ``d`` when the mapped position changes.
 
     Parameters stored on each target
     --------------------------------
@@ -125,6 +124,7 @@ class FittingTarget(abc.ABC):
     P: sparse.csr_matrix
     d: FloatArray
     head: xr.DataArray
+    valid: BoolArray
     sigma: FloatArray
     weights: FloatArray
     scale: FloatArray
@@ -146,7 +146,11 @@ class FittingTarget(abc.ABC):
         Recovered exactly from ``d``, so it cannot go stale. Requires strictly
         positive weights, which ``_set_target`` enforces.
         """
-        return self.d / self.scale
+        return np.where(
+            self.valid,
+            self.d / self.scale,
+            np.nan,
+        )
 
     def _extract(self, values: FloatArray) -> FloatArray:
         """Observation values from a single (raw) time slice of the source."""
@@ -214,6 +218,7 @@ class FittingTarget(abc.ABC):
             )
 
         self.head = head
+        self.valid = np.ones(nhead, dtype=bool)
         self.sigma = sigma
         self.weights = weights
         self.scale = np.sqrt(weights) / sigma
@@ -229,7 +234,9 @@ class FittingTarget(abc.ABC):
     def _set_d(self, time_index: int) -> None:
         """Refresh ``d`` from time slice ``time_index`` of the source."""
         values = self._extract(self.head.isel(time=time_index).to_numpy())
+        np.isfinite(values, out=self.valid)
         np.multiply(self.scale, values, out=self.d)
+        np.nan_to_num(self.d, nan=0.0, copy=False)
         self._current = time_index
         return
 
@@ -272,13 +279,7 @@ class FittingTarget(abc.ABC):
 
 
 class GridSampling(FittingTarget):
-    """
-    Sample head values directly from corresponding grid cells.
-
-    Only cells with not-NA values at every timestamp are included: the observation
-    network is fixed for the run, so a cell that drops out partway would
-    change the shape of ``P``.
-    """
+    """Sample head values directly from corresponding grid cells."""
 
     def __init__(
         self,
@@ -288,17 +289,11 @@ class GridSampling(FittingTarget):
     ):
         head = _promote(head, dims=("y", "x"))
         notnull = head.notnull()
-        mask = notnull.all("time")
+        mask = notnull.any("time")
         self._row_index = np.flatnonzero(mask)
         nhead = self._row_index.size
         if nhead == 0:
             raise ValueError("Full NoData at every timestamp.")
-        if not np.array_equal(mask, notnull.any("time")):
-            raise ValueError(
-                "The set of NoData cells varies in time, but P is fixed. "
-                "Drop intermittent cells or split the run into segments."
-            )
-
         P = sparse.csr_matrix(
             (np.ones(nhead), (np.arange(nhead), self._row_index)),
             shape=(nhead, mask.size),
@@ -402,11 +397,11 @@ class CompositeTarget(FittingTarget):
     ``weights``, composition is simply vertical stacking of the observation
     operators and concatenation of the target vectors.
 
-    Only ``d`` is stacked. Each component's ``d`` is rebound as a view onto the
-    corresponding row block, so a component's ``advance`` writes straight into
-    the composite and the two cannot desync. Consequently a component belongs
-    to exactly one composite, and its ``d`` must be written in place
-    (``np.copyto``, ``out=``) rather than reassigned.
+    Only ``d`` and ``valid`` are stacked. Each component's array is rebound as a
+    view onto the corresponding row block, so a component's ``advance`` writes
+    straight into the composite and the two cannot desync. Consequently a
+    component belongs to exactly one composite, and its ``d`` and ``valid`` must
+    be written in place (``np.copyto``, ``out=``) rather than reassigned.
     """
 
     def __init__(
@@ -442,6 +437,7 @@ class CompositeTarget(FittingTarget):
 
         self.P = sparse.vstack([t.P for t in flat], format="csr")
         self.d = np.hstack([t.d for t in flat])
+        self.valid = np.hstack([t.valid for t in flat])
 
         # Relies on vstack preserving block order; the row count check is what
         # catches it if that ever stops holding.
@@ -454,8 +450,11 @@ class CompositeTarget(FittingTarget):
 
         self.targets = flat
         self.slices = [slice(a, b) for a, b in zip(offsets[:-1], offsets[1:])]
+        # Rebind the target `d`, `valid` arrays as views on the composite,
+        # Such that updating in the target results in a composite update.
         for target, target_slice in zip(flat, self.slices):
             target.d = self.d[target_slice]
+            target.valid = self.valid[target_slice]
             target._composite = self
         return
 
