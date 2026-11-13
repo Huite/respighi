@@ -98,11 +98,13 @@ gwf.head.isel(layer=0).plot.contour(levels=30)
 # %%
 # Create some "synthetic piezometers from the transient IBRAHYM results.
 
+
 def make_piezometers(n_piezometers, xmin, xmax, ymin, ymax):
     rng = np.random.default_rng(seed=12345)
     x = xmin + (xmax - xmin) * rng.random(n_piezometers)
     y = ymin + (ymax - ymin) * rng.random(n_piezometers)
     return x, y
+
 
 x, y = make_piezometers(
     n_piezometers=100,
