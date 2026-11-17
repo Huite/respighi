@@ -15,7 +15,6 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-import xugrid as xu
 
 import respighi as rsp
 
@@ -141,12 +140,11 @@ target_head = head_timeseries.sel(time=slice(START_DATE, END_DATE))
 # over time.
 
 PIEZOMETER_SIGMA = 0.1
-grid = xu.Ugrid2d.from_structured(ibrahym_head)
 target = rsp.CellSampling(
     x=target_head["x"],
     y=target_head["y"],
     head=target_head,
-    grid=grid,
+    groundwatermodel=gwf,
     sigma=PIEZOMETER_SIGMA,
 )
 

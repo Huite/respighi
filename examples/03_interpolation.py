@@ -16,7 +16,6 @@ This examples show a synthetic example:
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-import xugrid as xu
 
 import respighi as rsp
 
@@ -98,8 +97,7 @@ headvalues = head.sel(x=xr.DataArray(x), y=xr.DataArray(y), method="nearest").to
 # We use these sites to create a fitting target.
 # For now, respighi requires an xugrid.Ugrid2d topology as the grid definition.
 
-grid = xu.Ugrid2d.from_structured(transmissivity)
-target = rsp.CellSampling(x, y, headvalues, grid)
+target = rsp.CellSampling(x, y, headvalues, groundwatermodel=gwf)
 
 # Inverse Problem
 # ---------------
@@ -149,7 +147,7 @@ for ax in axes:
     ax.set_aspect(1.0)
 
 # %%
-# Finally, let's have a look at the Langrangian
+# Finally, let's have a look at the Lagrangian
 
 fig, ax = plt.subplots(figsize=(10, 4))
 inverse.lagrangian.plot(ax=ax)

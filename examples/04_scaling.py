@@ -105,11 +105,9 @@ ax.set_aspect(1.0)
 # Target
 # ------
 #
-# We use this coarse grid to create a fitting target. For now, respighi
-# requires an xugrid.Ugrid2d topology as the grid definition.
+# We use this coarse grid to create a fitting target.
 
-grid = xu.Ugrid2d.from_structured(transmissivity)
-target = rsp.ModelTarget(coarsehead, grid)
+target = rsp.ModelTarget(coarsehead, groundwatermodel=gwf)
 
 # %%
 # Inverse Problem
@@ -174,12 +172,14 @@ selection = xall > xhalf
 x = xall[selection]
 y = yall[selection]
 headvalues = head.sel(x=xr.DataArray(x), y=xr.DataArray(y), method="nearest").to_numpy()
-samplingtarget = rsp.CellSampling(x, y, headvalues, grid)
+samplingtarget = rsp.CellSampling(x, y, headvalues, groundwatermodel=gwf)
 
 # %%
 # We'll take half of the earlier coarse grid.
 
-modeltarget = rsp.ModelTarget(coarsehead.sel(x=slice(None, xhalf)), grid=grid)
+modeltarget = rsp.ModelTarget(
+    coarsehead.sel(x=slice(None, xhalf)), groundwatermodel=gwf
+)
 
 # %%
 # And we'll combine them into a single fitting target.

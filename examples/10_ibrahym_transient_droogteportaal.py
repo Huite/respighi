@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-import xugrid as xu
 
 import respighi as rsp
 
@@ -114,12 +113,11 @@ gwf.head.isel(layer=0).plot.contour(levels=30)
 # data.
 
 head = xr.open_dataarray("../tmp-scripts/transient-observations.nc")
-grid = xu.Ugrid2d.from_structured(modelhead)
 target = rsp.CellSampling(
     x=head["x"],
     y=head["y"],
     head=head,
-    grid=grid,
+    groundwatermodel=gwf,
     sigma=PIEZOMETER_SIGMA,
 )
 # %%

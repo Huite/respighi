@@ -116,7 +116,7 @@ class InverseProblem(NonlinearIteration):
         self.layer_n = self.gwf.layer_n
         self.regularization = regularization
         self.active = groundwatermodel.active
-        self.active_first_layer = self.active[: self.layer_n]
+        self.active_first_layer = groundwatermodel.active_first_layer
 
         self.K, self.Pt, self.matrix_type = self._build_matrix(regularization)
         self.rhs = self._build_rhs_vector()
@@ -520,7 +520,7 @@ class InverseProblem(NonlinearIteration):
         return self.x[-self.n :]
 
     @property
-    def _langrangian3d(self):
+    def _lagrangian3d(self):
         return np.where(
             self.active,
             self._lagrangian,

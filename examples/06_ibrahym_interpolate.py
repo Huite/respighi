@@ -15,7 +15,6 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-import xugrid as xu
 
 import respighi as rsp
 
@@ -125,11 +124,10 @@ ax.scatter(x, y, color="k", alpha=0.5)
 # %%
 # Make a respighi Target
 
-grid = xu.Ugrid2d.from_structured(modelhead)
 headvalues = modelhead.sel(
     x=xr.DataArray(x), y=xr.DataArray(y), method="nearest"
 ).to_numpy()
-target = rsp.CellSampling(x, y, headvalues, grid)
+target = rsp.CellSampling(x, y, headvalues, groundwatermodel=gwf)
 
 # %%
 # Inverse Problem

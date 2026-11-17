@@ -7,6 +7,8 @@ import xugrid as xu
 from numpy.typing import NDArray
 from scipy import sparse
 
+from respighi.groundwaterflow import GroundwaterModel
+
 FloatArray = NDArray[np.floating]
 BoolArray = NDArray[np.bool_]
 
@@ -284,10 +286,20 @@ class GridSampling(FittingTarget):
     def __init__(
         self,
         head: FloatArray | xr.DataArray,
+        groundwatermodel: GroundwaterModel,
         weights=None,
         sigma=None,
     ):
         head = _promote(head, dims=("y", "x"))
+
+        n_head = head.size
+        n_cell = groundwatermodel.layer_n
+        if n_head != n_cell:
+            raise ValueError(
+                "Head array must contain the same number of values as the "
+                f"groundwater model. Found {n_head} versus {n_cell}, respectively."
+            )
+
         notnull = head.notnull()
         mask = notnull.any("time")
         self._row_index = np.flatnonzero(mask)
@@ -309,11 +321,12 @@ class CellSampling(FittingTarget):
         x: FloatArray,
         y: FloatArray,
         head: FloatArray | xr.DataArray,
-        grid: xu.Ugrid2d,
+        groundwatermodel: GroundwaterModel,
         weights=None,
         sigma=None,
     ):
         head = _promote(head, dims=("observation",))
+        grid = groundwatermodel.grid
         if head.ndim != 2:
             raise ValueError(
                 f"Expected a source with dims (time, observation), got {head.dims}."
@@ -337,6 +350,12 @@ class CellSampling(FittingTarget):
                 f"{outside.size} observation(s) fall outside the grid, first "
                 f"at index {outside[0]} ({x[outside[0]]}, {y[outside[0]]})."
             )
+        inactive = np.flatnonzero(~groundwatermodel.active_first_layer[j])
+        if inactive.size:
+            raise ValueError(
+                f"{inactive.size} observation(s) fall in inactive model cells, "
+                f"first at index {inactive[0]} ({x[inactive[0]]}, {y[inactive[0]]})."
+            )
 
         P = sparse.csr_matrix(
             (np.ones(nhead), (np.arange(nhead), j)),
@@ -351,11 +370,13 @@ class ModelTarget(FittingTarget):
     def __init__(
         self,
         head: FloatArray | xr.DataArray,
-        grid: xu.Ugrid2d,
+        groundwatermodel: GroundwaterModel,
         weights=None,
         sigma=None,
     ):
         head = _promote(head, dims=("y", "x"))
+        active = groundwatermodel.active
+        grid = groundwatermodel.grid
 
         # Dummy source data for the regridder API; only the weights are used.
         source = xu.UgridDataArray.from_data(
@@ -373,6 +394,9 @@ class ModelTarget(FittingTarget):
             (W.data, W.indices, W.indptr),
             shape=(W.n, W.m),
         )
+        # Filter overlap areas in inactive zones.
+        Wcsr = Wcsr.multiply(active[np.newaxis, :]).tocsr()
+        Wcsr.eliminate_zeros()
 
         # Normalize overlap weights row-wise to produce cell averages. Rows
         # without overlap are dropped rather than zeroed: a zero row leaves the

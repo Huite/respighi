@@ -16,7 +16,6 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-import xugrid as xu
 
 import respighi as rsp
 
@@ -114,9 +113,10 @@ piezometers = gpd.read_file("../tmp-scripts/ibrahym-patch-piezometers.gpkg")
 piezometers = piezometers.loc[piezometers["mean_head"].notnull()]
 x = piezometers.geometry.x.to_numpy()
 y = piezometers.geometry.y.to_numpy()
-grid = xu.Ugrid2d.from_structured(modelhead)
 head = piezometers["mean_head"].to_numpy()
-target = rsp.CellSampling(x, y, piezometers["mean_head"], grid, sigma=PIEZOMETER_SIGMA)
+target = rsp.CellSampling(
+    x, y, piezometers["mean_head"], groundwatermodel=gwf, sigma=PIEZOMETER_SIGMA
+)
 
 # %%
 # With the groundwater model and the target, we can pose an inverse problem to solve.

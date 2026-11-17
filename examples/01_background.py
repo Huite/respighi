@@ -291,7 +291,7 @@ fig.suptitle("Forward solution ('truth')")
 observed_indices = np.array([5, 15, 25, 35, 45])
 target_head = np.full((1, ncell), np.nan)
 target_head[0, observed_indices] = gwf._head[observed_indices]
-target = rsp.GridSampling(head=target_head)
+target = rsp.GridSampling(head=target_head, groundwatermodel=gwf)
 
 
 # %%
@@ -318,7 +318,7 @@ original_head = gwf._head.copy()
 for col, (label, obs_idx) in enumerate(observation_sets.items()):
     target_head = np.full((1, ncell), np.nan)
     target_head[0, obs_idx] = original_head[obs_idx]
-    target = rsp.GridSampling(target_head)
+    target = rsp.GridSampling(target_head, groundwatermodel=gwf)
 
     inverse = rsp.InverseProblem(
         groundwatermodel=gwf,
@@ -361,7 +361,7 @@ fig.tight_layout()
 obs_idx = np.array([5, 15, 25, 35, 45])
 target_head = np.full((1, ncell), np.nan)
 target_head[0, obs_idx] = gwf._head[obs_idx]
-target = rsp.GridSampling(target_head)
+target = rsp.GridSampling(target_head, groundwatermodel=gwf)
 
 inverse = rsp.InverseProblem(
     groundwatermodel=gwf,

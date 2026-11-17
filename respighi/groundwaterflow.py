@@ -531,6 +531,7 @@ class GroundwaterModel(NonlinearIteration):
             horizontal_flow_barriers,
         )
         self.inactive = ~self.active
+        self.active_first_layer = self.active[: self.layer_n]
         self.initial[self.inactive] = 0.0
 
         # Work arrays
@@ -570,6 +571,14 @@ class GroundwaterModel(NonlinearIteration):
             if nonlinear_settings is not None
             else NonlinearSettings()
         )
+        # Make room for an xugrid Grid object for target look-ups and the like.
+        self._grid = None
+
+    @property
+    def grid(self):
+        if self._grid is None:
+            self._grid = xu.Ugrid2d.from_structured(self.head)
+        return self._grid
 
     @property
     def state(self) -> FloatArray:
@@ -582,7 +591,7 @@ class GroundwaterModel(NonlinearIteration):
         return self.hcof
 
     def primary(self, vector) -> FloatArray:
-        """Head is the whole state here."""
+        """Head."""
         return vector
 
     def residual(self) -> FloatArray:
