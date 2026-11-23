@@ -5,7 +5,36 @@ from scipy import sparse
 from scipy.special import k1
 
 from respighi.constants import BoolArray
-from respighi.groundwaterflow import GroundwaterModel
+
+
+def build_connectivity(shape):
+    """
+    Return the row and column indices of all nearest-neighbour pairs for a
+    grid of the given shape.
+
+    Connections are built along every axis, so for a ``(nlayer, ny, nx)``
+    grid this covers horizontal (x, y) and vertical (layer) neighbours.
+    Each pair appears twice — once in each direction — yielding a symmetric
+    sparsity pattern suitable for the conductance matrix.
+    """
+    size = np.prod(shape)
+    index = np.arange(size).reshape(shape)
+    # Build nD connectivity
+    ii = []
+    jj = []
+    for d in range(len(shape)):
+        slices = [slice(None)] * len(shape)
+
+        slices[d] = slice(None, -1)
+        left = index[tuple(slices)].ravel()
+        slices[d] = slice(1, None)
+        right = index[tuple(slices)].ravel()
+        ii.extend([left, right])
+        jj.extend([right, left])
+
+    i = np.concatenate(ii)
+    j = np.concatenate(jj)
+    return i, j
 
 
 def graph_laplacian(ny: int, nx: int, active: BoolArray) -> sparse.csr_matrix:
@@ -13,7 +42,7 @@ def graph_laplacian(ny: int, nx: int, active: BoolArray) -> sparse.csr_matrix:
         raise ValueError("Active mask size does not match grid.")
 
     layer_n = ny * nx
-    i, j = GroundwaterModel.build_connectivity((ny, nx))
+    i, j = build_connectivity((ny, nx))
     valid = active[i] & active[j]
     i, j = i[valid], j[valid]
     W_2d = sparse.coo_matrix(

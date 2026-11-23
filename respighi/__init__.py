@@ -1,5 +1,6 @@
 __version__ = "0.0.1"
 
+from respighi.anisotropy import AnisotropicTransmissivity
 from respighi.groundwaterflow import (
     Drainage,
     GroundwaterModel,
@@ -42,6 +43,7 @@ __all__ = (
     "Drainage",
     "River",
     "GroundwaterModel",
+    "AnisotropicTransmissivity",
     "LinearInterpolationSurrogate",
     "GridSampling",
     "CellSampling",

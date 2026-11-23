@@ -8,8 +8,14 @@ import numpy as np
 import xarray as xr
 import xugrid as xu
 from scipy import sparse
-from scipy.sparse._sparsetools import csr_matvec
+from scipy.sparse._sparsetools import csc_matvec, csr_matvec
 
+from respighi.anisotropy import (
+    AnisotropicTransmissivity,
+    Connections,
+    horizontal_operator,
+    incidence,
+)
 from respighi.constants import BoolArray, FloatArray, IntArray
 from respighi.linearsolvers.settings import LinearSettings, PCGSettings
 from respighi.linearsolvers.solvertypes import MatrixType
@@ -307,8 +313,9 @@ class HorizontalFlowBarrier:
     """
     Resistance applied to the connection between two laterally adjacent cells.
 
-    Static in time: the modification to intercell conductances is applied once,
-    at model construction.
+    Static in time: applied once, at model construction, by scaling the full
+    face flux (two-point and cross-derivative parts) by ``1 / (1 + r * C)``,
+    with C the two-point face conductance. See ``respighi.anisotropy``.
     """
 
     layer: int  # 0-based
@@ -351,25 +358,6 @@ class HorizontalFlowBarrier:
             cell1=cell1,
             resistance=resistance,
         )
-
-    def modify_conductance(self, transmissivity: FloatArray):
-        _, ny, nx = transmissivity.shape
-        layer_size = ny * nx
-        if self.cell0.size == 0:
-            return [], [], []
-        if self.cell0.max() >= layer_size or self.cell1.max() >= layer_size:
-            raise ValueError("HFB cell index exceeds number of cells in a layer")
-        # Utilize a negative correction: duplicate summing of the COO matrix does the
-        # necessary work.
-        kD = transmissivity.ravel()
-        i = self.cell0 + self.layer * layer_size
-        j = self.cell1 + self.layer * layer_size
-        kDi = kD[i]
-        kDj = kD[j]
-        C_ij = (2 * kDi * kDj) / (kDi + kDj)
-        C_modified = C_ij / (1.0 + self.resistance * C_ij)
-        C_delta = C_modified - C_ij
-        return [i, j], [j, i], [C_delta, C_delta]
 
 
 def atleast_3d_front(a):
@@ -416,7 +404,7 @@ class GroundwaterModel(NonlinearIteration):
         initial,
         recharge,
         head_boundaries,
-        transmissivity: FloatArray,
+        transmissivity: FloatArray | AnisotropicTransmissivity,
         resistance: FloatArray | None = None,
         storativity: FloatArray | None = None,
         horizontal_flow_barriers: Sequence[HorizontalFlowBarrier] = (),
@@ -435,9 +423,11 @@ class GroundwaterModel(NonlinearIteration):
             Recharge boundary condition.
         head_boundaries: sequence
             Boundaries such as drainage, river, (linear) head boundary.
-        transmissivity: np.ndarray of floats
+        transmissivity: np.ndarray of floats or AnisotropicTransmissivity
             May be shaped ``(ny, nx)`` for a single layer model;
             or shaped ``(nlayer, ny, nx)`` for multi-layer models.
+            An :class:`AnisotropicTransmissivity` switches the horizontal
+            discretization to the 9-point XT3D-style stencil.
         resistance: np.ndarray of floats, optional
             May be shaped ``(ny, nx)`` for a two layer model;
             or shaped ``(nlayer - 1, ny, nx)`` for more layers.
@@ -457,16 +447,36 @@ class GroundwaterModel(NonlinearIteration):
         symmetric : bool, optional
             Whether to store only the upper triangle or materialize both halves for
             a general solver. The system is symmetric, but the general treatment may
-            be more robust in some cases.
+            be more robust in some cases. Anisotropic transmissivity makes the
+            system nonsymmetric, so it requires symmetric=False.
         """
-        transmissivity_3d = atleast_3d_front(transmissivity)
+        # Dispatch on the transmissivity type. The isotropic path passes
+        # txy=None, which keeps the 5-point stencil and its sparsity pattern.
+        # An axis-aligned tensor (all cross components zero) takes that path
+        # too: it differs from isotropic only in Txx != Tyy, which the
+        # two-point part handles, and the matrix stays symmetric.
+        if isinstance(transmissivity, AnisotropicTransmissivity):
+            txx, tyy, txy = transmissivity.components()
+            if (txy[np.isfinite(txy)] == 0.0).all():
+                txy = None
+            template = transmissivity.t1
+        else:
+            txx = atleast_3d_front(transmissivity)
+            tyy, txy = txx, None
+            template = transmissivity
+        if txy is not None and symmetric:
+            raise ValueError(
+                "Anisotropic transmissivity yields a nonsymmetric matrix: "
+                "use symmetric=False."
+            )
+        transmissivity_3d = txx
         initial_3d = atleast_3d_front(initial)
         if initial_3d.shape != transmissivity_3d.shape:
             raise ValueError("Shapes of transmissivity and initial head do not match.")
         nlayer, ny, nx = transmissivity_3d.shape
 
-        if isinstance(transmissivity, xr.DataArray):
-            coords = dict(transmissivity.coords)
+        if isinstance(template, xr.DataArray):
+            coords = dict(template.coords)
             if "layer" not in coords:
                 coords["layer"] = np.array([0])  # TODO(?): 0 or 1-based indexing
             self._coords = coords
@@ -511,7 +521,8 @@ class GroundwaterModel(NonlinearIteration):
 
         n = self.initial.size
         self.layer_n = ny * nx
-        self.transmissivity = transmissivity_3d
+        self.shape = transmissivity_3d.shape
+        self.transmissivity = transmissivity
         self.resistance = resistance_3d
         self.storativity = storativity_3d.ravel()
         self.horizontal_flow_barriers = horizontal_flow_barriers
@@ -523,9 +534,13 @@ class GroundwaterModel(NonlinearIteration):
         for boundary in self.head_boundaries:
             boundary.bind_grid(area)
 
-        # Matrix assembly
-        self.W, self.active = self._build_conductance(
-            transmissivity_3d,
+        # Matrix assembly. The orientation convention fixes the sign of the
+        # cross-derivative terms; square cells make the cell size cancel.
+        self._check_orientation(self._coords)
+        self.L, self.active = self._build_operator(
+            txx,
+            tyy,
+            txy,
             resistance_3d,
             area,
             horizontal_flow_barriers,
@@ -540,15 +555,13 @@ class GroundwaterModel(NonlinearIteration):
         self._head_old = self._head.astype(float, copy=True)
         self._storage_work = np.empty_like(self.storativity, dtype=float)
         self._residual = np.empty_like(self._head, dtype=float)
+        self._residual_work = np.empty_like(self._head, dtype=float)
 
-        # Compute the (weighted) degree matrix
-        self.D = np.asarray(self.W.sum(axis=1)).ravel()
+        # Base diagonal, without boundary condition terms.
+        self.D = self.L.diagonal().copy()
         self.D[self.inactive] = 1.0
         self.hcof = self.D.copy()
-        # Compute the Laplacian. Force explicit storage of the diagonal, since
-        # cells with a zero degree would otherwise leave a structural hole that
-        # the per-iteration diagonal assignment cannot fill.
-        A = sparse.diags(self.D) - self.W
+        A = self.L
         if symmetric:
             self.A = sparse.triu(A).tocsr()
             self.matrix_type = MatrixType.SYMMETRIC_POSITIVE_DEFINITE
@@ -607,98 +620,95 @@ class GroundwaterModel(NonlinearIteration):
         # than allocating a temporary for A @ x.
         np.negative(self.rhs, out=self._residual)
         csr_matvec(*A.shape, A.indptr, A.indices, A.data, self._head, self._residual)
+        if self.matrix_type is MatrixType.SYMMETRIC_POSITIVE_DEFINITE:
+            # Only the upper triangle is stored. Reading the CSR arrays as CSC
+            # applies the transpose, which adds the lower triangle, but the
+            # diagonal a second time; take that back out.
+            csc_matvec(
+                *A.shape, A.indptr, A.indices, A.data, self._head, self._residual
+            )
+            np.multiply(self.hcof, self._head, out=self._residual_work)
+            np.subtract(self._residual, self._residual_work, out=self._residual)
         np.negative(self._residual, out=self._residual)
         return self._residual
 
-    @classmethod
-    def build_connectivity(cls, shape):
+    @staticmethod
+    def _check_orientation(coords) -> None:
         """
-        Return the row and column indices of all nearest-neighbour pairs for a
-        grid of the given shape.
+        Require columns towards increasing x and rows towards decreasing y.
 
-        Connections are built along every axis, so for a ``(nlayer, ny, nx)``
-        grid this covers horizontal (x, y) and vertical (layer) neighbours.
-        Each pair appears twice — once in each direction — yielding a symmetric
-        sparsity pattern suitable for the conductance matrix.
+        The tensor angle is counter-clockwise in map view; on a grid with the
+        other orientation the cross terms would rotate the wrong way.
         """
-        size = np.prod(shape)
-        index = np.arange(size).reshape(shape)
-        # Build nD connectivity
-        ii = []
-        jj = []
-        for d in range(len(shape)):
-            slices = [slice(None)] * len(shape)
-
-            slices[d] = slice(None, -1)
-            left = index[tuple(slices)].ravel()
-            slices[d] = slice(1, None)
-            right = index[tuple(slices)].ravel()
-            ii.extend([left, right])
-            jj.extend([right, left])
-
-        i = np.concatenate(ii)
-        j = np.concatenate(jj)
-        return i, j
+        for dim, expected in (("x", 1.0), ("y", -1.0)):
+            values = np.asarray(coords.get(dim, ()))
+            if values.size > 1 and not (np.sign(np.diff(values)) == expected).all():
+                order = "increasing" if expected > 0 else "decreasing"
+                raise ValueError(f"{dim} coordinates must be monotonically {order}.")
 
     @classmethod
-    def _build_conductance(
-        cls, transmissivity, resistance, area, horizontal_flow_barriers
+    def _build_operator(
+        cls,
+        txx,
+        tyy,
+        txy,
+        resistance,
+        area,
+        horizontal_flow_barriers,
     ):
         """
-        Assemble the weighted adjacency matrix of internodal conductances.
+        Assemble the flow operator L, with ``(L @ h)[i]`` the net outflow of i.
 
-        Horizontal conductances between cells i and j use the harmonic mean of
-        transmissivities: ``C_ij = 2*kDi*kDj / (kDi + kDj)``. Vertical
-        conductances between layers use ``C = area / resistance``. Horizontal
-        flow barriers apply a negative correction via duplicate COO entries.
+        Horizontal: from a table of connections, see :mod:`respighi.anisotropy`;
+        for isotropic input (txy None) the harmonic-mean 5-point stencil, for
+        anisotropic input the XT3D-style 9-point stencil. Barriers are
+        accumulated on the table and scale the full face flux. Vertical: ``C = area / resistance``,
+        two-point, so with anisotropy each row has at most 9 + 2 = 11 entries.
 
-        Returns a CSR sparse matrix of shape ``(n, n)`` where ``n`` is the total
-        number of cells.
+        Returns
+        -------
+        L: csr_matrix
+            Operator with every diagonal entry stored explicitly, so the
+            per-iteration diagonal assignment never meets a structural hole.
+        active: BoolArray
         """
-        # Get the Cartesian neighbors for a finite difference approximation.
-        # TODO: check order of dimensions with DataArray
-        _, ny, nx = transmissivity.shape
-        size = transmissivity.size
-        layer_size = ny * nx
-        i, j = cls.build_connectivity(transmissivity.shape)
-        kD = transmissivity.ravel()
-        c = resistance.ravel()
+        nlayer = txx.shape[0]
+        size = txx.size
+        active = np.isfinite(txx) & np.isfinite(tyy)
+        if txy is not None:
+            active &= np.isfinite(txy)
+        active = active.ravel()
 
-        delta = abs(i - j)
-        horizontal = delta < layer_size
-        conductance = np.empty_like(i, dtype=float)
-        kDi = kD[i[horizontal]]
-        kDj = kD[j[horizontal]]
-        C_ij = (2 * kDi * kDj) / (kDi + kDj)
-        conductance[horizontal] = C_ij
+        # Barriers go on the full table, so a barrier next to an inactive
+        # cell is simply dropped with its connection.
+        conn = Connections.structured(txx.shape, horizontal_flow_barriers)
+        conn = conn.select(active[conn.i] & active[conn.j])
+        L, _ = horizontal_operator(
+            conn, txx.ravel(), tyy.ravel(), None if txy is None else txy.ravel()
+        )
 
-        if not horizontal.all():
-            vertical = ~horizontal
-            i_upper = np.minimum(i[vertical], j[vertical])
-            conductance[vertical] = area / c[i_upper]
+        if nlayer > 1:
+            index = np.arange(size).reshape(txx.shape)
+            upper = index[:-1].ravel()
+            lower = index[1:].ravel()
+            with np.errstate(divide="ignore"):
+                C = area / resistance.ravel()
+            ok = active[upper] & active[lower] & np.isfinite(C)
+            Dv = incidence(upper[ok], lower[ok], size)
+            L = L + Dv.T @ sparse.diags(C[ok]) @ Dv
 
-        rows = [i]
-        columns = [j]
-        data = [conductance]
-        for hfb in horizontal_flow_barriers:
-            # Utilize a negative correction: duplicate summing of the COO matrix does the
-            # necessary work.
-            ij, ji, C_delta = hfb.modify_conductance(transmissivity)
-            rows.extend(ij)
-            columns.extend(ji)
-            data.extend(C_delta)
-
-        rows = np.concatenate(rows)
-        columns = np.concatenate(columns)
-        data = np.concatenate(data)
-
-        active = np.isfinite(transmissivity.ravel())
-        valid = active[rows] & active[columns] & np.isfinite(data)
-        connectivity = sparse.coo_matrix(
-            (data[valid], (rows[valid], columns[valid])),
+        # Store every diagonal entry explicitly; sparse sums drop zeros, so go
+        # through COO.
+        L = L.tocoo()
+        diagonal = np.arange(size)
+        L = sparse.coo_matrix(
+            (
+                np.concatenate([L.data, np.zeros(size)]),
+                (np.concatenate([L.row, diagonal]), np.concatenate([L.col, diagonal])),
+            ),
             shape=(size, size),
         ).tocsr()
-        return connectivity, active
+        return L, active
 
     def formulate(self, dt=None, recharge=True):
         """
@@ -840,7 +850,7 @@ class GroundwaterModel(NonlinearIteration):
             tmp = tempfile.TemporaryDirectory(prefix="respighi-")
             path = Path(tmp.name) / "gwf-results.zarr"
 
-        nlayer, ny, nx = self.transmissivity.shape
+        nlayer, ny, nx = self.shape
         dts = self._timestep_sizes(time)
         steady = np.broadcast_to(steady_state, len(dts))
         self.bind_time(time)
@@ -870,15 +880,15 @@ class GroundwaterModel(NonlinearIteration):
         """
         Current head as a labelled DataArray of shape ``(layer, y, x)``.
 
-        Coordinates are taken from the transmissivity DataArray if one was
-        provided at construction, otherwise synthesised from cell size and
+        Coordinates are taken from the transmissivity DataArray (or the t1
+        DataArray of an anisotropic tensor) if one was provided at construction, otherwise synthesised from cell size and
         grid dimensions.
         """
         head_3d = np.where(
             self.active,
             self._head,
             np.nan,
-        ).reshape(self.transmissivity.shape)
+        ).reshape(self.shape)
         return xr.DataArray(
             head_3d, dims=("layer", "y", "x"), coords=self._coords, name="head"
         )

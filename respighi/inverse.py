@@ -188,7 +188,7 @@ class InverseProblem(NonlinearIteration):
 
         # NOTE:
         # Assumes constant cell sizes, and dx == dy.
-        ny, nx = self.gwf.transmissivity.shape[1:]
+        ny, nx = self.gwf.shape[1:]
         L = regularization.build_tikhonov_operator(
             ny=ny,
             nx=nx,
@@ -452,7 +452,7 @@ class InverseProblem(NonlinearIteration):
             tmp = tempfile.TemporaryDirectory(prefix="respighi-")
             path = Path(tmp.name) / "inverse-results.zarr"
 
-        nlayer, ny, nx = self.gwf.transmissivity.shape
+        nlayer, ny, nx = self.gwf.shape
         dts = self.gwf._timestep_sizes(time)
         steady = np.broadcast_to(steady_state, len(dts))
         self.gwf.bind_time(time)
@@ -499,7 +499,7 @@ class InverseProblem(NonlinearIteration):
             self.active,
             self._head,
             np.nan,
-        ).reshape(self.gwf.transmissivity.shape)
+        ).reshape(self.gwf.shape)
 
     @property
     def _recharge(self):
@@ -512,7 +512,7 @@ class InverseProblem(NonlinearIteration):
             self.active_first_layer,
             self._recharge,
             np.nan,
-        ).reshape(self.gwf.transmissivity.shape[1:])
+        ).reshape(self.gwf.shape[1:])
 
     @property
     def _lagrangian(self):
@@ -525,7 +525,7 @@ class InverseProblem(NonlinearIteration):
             self.active,
             self._lagrangian,
             np.nan,
-        ).reshape(self.gwf.transmissivity.shape)
+        ).reshape(self.gwf.shape)
 
     @property
     def head(self):
@@ -630,7 +630,7 @@ class InverseProblem(NonlinearIteration):
         """
         W = self.observation_mapping_matrix()
         n_obs = len(self.target.d)
-        head_shape = self.gwf.transmissivity.shape
+        head_shape = self.gwf.shape
         return xr.Dataset(
             data_vars={
                 "head_reference": self.head,
@@ -677,7 +677,7 @@ class InverseProblem(NonlinearIteration):
             self.active,
             variance,
             np.nan,
-        ).reshape(self.gwf.transmissivity.shape)
+        ).reshape(self.gwf.shape)
         return xr.DataArray(
             data=variance3d,
             dims=("layer", "y", "x"),
